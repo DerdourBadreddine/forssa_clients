@@ -112,6 +112,9 @@ def main():
 
     model = build_model(label2id, id2label)
 
+    # Auto-disable fp16 if CUDA not available
+    use_fp16 = config.transformer_config.fp16 and torch.cuda.is_available()
+
     training_args = TrainingArguments(
         output_dir=args.output_dir / "checkpoints",
         evaluation_strategy="steps",
@@ -131,7 +134,7 @@ def main():
         greater_is_better=True,
         gradient_accumulation_steps=config.transformer_config.gradient_accumulation_steps,
         warmup_ratio=config.transformer_config.warmup_ratio,
-        fp16=config.transformer_config.fp16,
+        fp16=use_fp16,
         dataloader_num_workers=2,
     )
 

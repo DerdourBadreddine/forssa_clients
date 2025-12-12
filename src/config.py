@@ -71,7 +71,7 @@ class TransformerConfig:
     gradient_accumulation_steps: int = 2
     early_stopping_patience: int = 2
     label_smoothing: float = 0.05
-    fp16: bool = True
+    fp16: bool = True  # will be auto-disabled if CUDA is unavailable
 
 
 tfidf_config = TfidfConfig()
