@@ -15,6 +15,16 @@ from . import config
 from .data_io import DataSchema, load_datasets
 
 
+def _find_col_case_insensitive(df: pd.DataFrame, name: str) -> str | None:
+    if name in df.columns:
+        return name
+    low = name.lower()
+    for c in df.columns:
+        if c.lower() == low:
+            return c
+    return None
+
+
 def _load_best_experiment() -> Dict:
     p = config.EXPERIMENTS_DIR / "best_experiment.json"
     if not p.exists():
@@ -29,14 +39,34 @@ def _predict_tfidf_payload(payload: Dict, test_df: pd.DataFrame) -> np.ndarray:
     char_vec = payload["char_vectorizer"]
     model = payload["model"]
 
-    Xw = word_vec.transform(test_df[schema.text_col])
-    Xc = char_vec.transform(test_df[schema.text_col])
-    X = hstack([Xw, Xc])
+    text_col = _find_col_case_insensitive(test_df, schema.text_col)
+    if text_col is None:
+        raise RuntimeError(f"Expected text column '{schema.text_col}' in test, found {list(test_df.columns)}")
+
+    social_col = None
+    if getattr(schema, "social_col", None):
+        social_col = _find_col_case_insensitive(test_df, schema.social_col)
+
+    Xw = word_vec.transform(test_df[text_col])
+    Xc = char_vec.transform(test_df[text_col])
+    X_text = hstack([Xw, Xc])
+
+    social_encoder = payload.get("social_encoder")
+    if social_encoder is not None and social_col is not None:
+        Xs = social_encoder.transform(test_df[social_col].fillna("").astype(str).str.strip().to_numpy().reshape(-1, 1))
+        X = hstack([X_text, Xs])
+    else:
+        X = X_text
 
     kind = payload.get("kind")
     if kind == "nbsvm":
         r = payload["r"]
-        X = X.multiply(r)
+        # r applies only to text features
+        X_text_scaled = X_text.multiply(r)
+        if social_encoder is not None and social_col is not None:
+            X = hstack([X_text_scaled, Xs])
+        else:
+            X = X_text_scaled
 
     if hasattr(model, "predict_proba"):
         return model.predict_proba(X)
@@ -60,9 +90,11 @@ def main():
     # Align columns from live detection to artifact schema
     # (both are normalized in data_io; we just need the correct text/id columns)
     if schema.text_col not in test_df.columns:
-        raise RuntimeError(f"Expected text column '{schema.text_col}' in test, found {list(test_df.columns)}")
+        if _find_col_case_insensitive(test_df, schema.text_col) is None:
+            raise RuntimeError(f"Expected text column '{schema.text_col}' in test, found {list(test_df.columns)}")
     if schema.id_col not in test_df.columns:
-        raise RuntimeError(f"Expected id column '{schema.id_col}' in test, found {list(test_df.columns)}")
+        if _find_col_case_insensitive(test_df, schema.id_col) is None:
+            raise RuntimeError(f"Expected id column '{schema.id_col}' in test, found {list(test_df.columns)}")
 
     models = best["models"]
 
@@ -87,7 +119,8 @@ def main():
     out_name = f"submission_{tag}_cv{score:.4f}_{ts}.csv"
     out_path = config.OUTPUT_DIR / out_name
 
-    sub = pd.DataFrame({schema.id_col: test_df[schema.id_col], "Class": preds.astype(int)})
+    id_col = _find_col_case_insensitive(test_df, schema.id_col) or schema.id_col
+    sub = pd.DataFrame({id_col: test_df[id_col], "Class": preds.astype(int)})
     sub.to_csv(out_path, index=False)
     print(f"Saved: {out_path}")
 

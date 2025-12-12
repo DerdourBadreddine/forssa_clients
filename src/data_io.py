@@ -19,6 +19,7 @@ class DataSchema:
     id_col: str
     text_col: str
     label_col: Optional[str] = None
+    social_col: Optional[str] = None
 
 
 class SchemaError(Exception):
@@ -54,6 +55,7 @@ def load_datasets(data_dir: Path | None = None) -> Tuple[pd.DataFrame, pd.DataFr
     id_col = _detect_column(train_df, config.CANDIDATE_ID_COLS)
     text_col = _detect_column(train_df, config.CANDIDATE_TEXT_COLS)
     label_col = _detect_column(train_df, config.CANDIDATE_LABEL_COLS)
+    social_col = _detect_column(train_df, getattr(config, "CANDIDATE_SOCIAL_COLS", []))
 
     if id_col is None or text_col is None or label_col is None:
         raise SchemaError(
@@ -72,8 +74,12 @@ def load_datasets(data_dir: Path | None = None) -> Tuple[pd.DataFrame, pd.DataFr
 
     test_id_col = _detect_column(test_df, config.CANDIDATE_ID_COLS)
     test_text_col = _detect_column(test_df, config.CANDIDATE_TEXT_COLS)
+    test_social_col = _detect_column(test_df, getattr(config, "CANDIDATE_SOCIAL_COLS", []))
     test_df[test_id_col] = test_df[test_id_col].astype(str)
     test_df[test_text_col] = test_df[test_text_col].astype(str)
+    if social_col is not None and test_social_col is not None:
+        train_df[social_col] = train_df[social_col].fillna("").astype(str).str.strip()
+        test_df[test_social_col] = test_df[test_social_col].fillna("").astype(str).str.strip()
 
     # Normalize text
     train_df[text_col] = train_df[text_col].fillna("").apply(normalize_text)
@@ -84,7 +90,7 @@ def load_datasets(data_dir: Path | None = None) -> Tuple[pd.DataFrame, pd.DataFr
     if invalid_labels:
         raise SchemaError(f"Labels out of expected range 1-9: {sorted(invalid_labels)}")
 
-    schema = DataSchema(id_col=id_col, text_col=text_col, label_col=label_col)
+    schema = DataSchema(id_col=id_col, text_col=text_col, label_col=label_col, social_col=social_col)
     return train_df, test_df, schema
 
 

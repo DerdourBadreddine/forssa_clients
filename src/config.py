@@ -32,6 +32,15 @@ CANDIDATE_TEXT_COLS = [
 ]
 CANDIDATE_LABEL_COLS = ["Class", "label", "target", "labels"]
 
+# Optional auxiliary feature columns (categorical)
+CANDIDATE_SOCIAL_COLS = [
+    "Réseau Social",
+    "Reseau Social",
+    "reseau social",
+    "social",
+    "source",
+]
+
 LABELS = list(range(1, 10))  # 1..9
 NUM_CLASSES = len(LABELS)
 

@@ -27,7 +27,11 @@ drive.mount('/content/drive')
 # If your text column is "Commentaire client", the code auto-detects it.
 
 # 3) Install deps
-!pip install -r requirements.txt
+!pip uninstall -y sentence-transformers gcsfs
+!pip install -r requirements.txt --no-cache-dir
+
+# If you still see import/version conflicts, restart the runtime once:
+# Runtime > Restart runtime
 
 # 4) Train TF-IDF (fast)
 !python -m src.train_tfidf
@@ -88,3 +92,12 @@ This workflow uses repeated StratifiedGroupKFold (grouped by normalized text has
 python -m src.train --seeds 42,43,44 --folds 5
 python -m src.make_submission --mode blend
 ```
+
+If your Kaggle score doesn't correlate with CV, try optimizing accuracy instead of macro-F1 (common for competitions):
+
+```bash
+python -m src.train --seeds 42,43,44 --folds 5 --opt-metric accuracy
+python -m src.make_submission --mode blend
+```
+
+The training script can also use the optional `Réseau Social` column as a one-hot feature (default: `--use-social auto`).
