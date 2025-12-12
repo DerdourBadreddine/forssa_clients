@@ -6,7 +6,7 @@ root = Path(__file__).resolve().parent.parent
 commands = [
     ["pip", "install", "-r", str(root / "requirements.txt")],
     ["python", "-m", "src.train_tfidf"],
-    ["python", "-m", "src.train_transformer"],
+    ["python", "-m", "src.train_transformer", "--report_to", "none"],
     ["python", "-m", "src.select_best"],
     ["python", "-m", "src.infer"],
 ]

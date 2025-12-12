@@ -9,37 +9,50 @@ End-to-end pipeline for the Kaggle multilingual Algerian customer comments chall
 - `outputs/` — submission.csv written here.
 - `scripts/` — helper script for Colab runs.
 
-## Quickstart (local)
-1) Install deps (Python 3.10+ recommended):
-   ```bash
-   pip install -r requirements.txt
-   ```
-2) Train TF-IDF baselines:
-   ```bash
-   python -m src.train_tfidf
-   ```
-3) Train transformer (GPU optional; will fall back to CPU):
-   ```bash
-   python -m src.train_transformer
-   ```
-4) Select best model (by validation macro F1) and record choice:
-   ```bash
-   python -m src.select_best
-   ```
-5) Produce submission.csv:
-   ```bash
-   python -m src.infer
-   ```
-   Output written to `outputs/submission.csv` with columns `id,Class`.
-6) Run error analysis on the current best model:
-   ```bash
-   python -m src.error_analysis
-   ```
+## Quickstart
 
-## Colab notes
-- Upload this repo or clone it, place data under `data/forsa-clients-satisfaction/`.
-- Run `pip install -r requirements.txt`.
-- Execute steps 2–5. GPU acceleration is automatic if available (transformer uses PyTorch/Accelerate).
+### Colab (GPU)
+```bash
+# 1) Mount Drive and clone (adjust folder if you prefer a different path)
+from google.colab import drive
+drive.mount('/content/drive')
+%cd /content
+!git clone https://github.com/DerdourBadreddine/forssa_clients.git
+%cd /content/forssa_clients
+
+# 2) Place data
+# Ensure data/forsa-clients-satisfaction/train.csv and test_file.csv exist.
+# If your text column is "Commentaire client", the code auto-detects it.
+
+# 3) Install deps
+!pip install -r requirements.txt
+
+# 4) Train TF-IDF (fast)
+!python -m src.train_tfidf
+
+# 5) Train transformer (GPU, fp16 auto-enabled)
+!python -m src.train_transformer --report_to none
+
+# 6) Select best and infer
+!python -m src.select_best
+!python -m src.infer
+
+# Submission written to outputs/submission.csv
+```
+
+### Local
+```bash
+pip install -r requirements.txt
+python -m src.train_tfidf
+python -m src.train_transformer
+python -m src.select_best
+python -m src.infer
+```
+
+Error analysis:
+```bash
+python -m src.error_analysis
+```
 
 ## Key design points
 - Deterministic seeding via `config.SEED`.
