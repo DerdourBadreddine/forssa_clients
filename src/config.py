@@ -20,7 +20,15 @@ SELECTION_FILE = ARTIFACTS_DIR / "selected_model.txt"
 
 # Columns to try to auto-detect
 CANDIDATE_ID_COLS = ["id", "ID"]
-CANDIDATE_TEXT_COLS = ["comment", "text", "message", "content", "review", "body"]
+CANDIDATE_TEXT_COLS = [
+    "comment",
+    "text",
+    "message",
+    "content",
+    "review",
+    "body",
+    "Commentaire client",  # dataset-specific french column
+]
 CANDIDATE_LABEL_COLS = ["Class", "label", "target", "labels"]
 
 LABELS = list(range(1, 10))  # 1..9
