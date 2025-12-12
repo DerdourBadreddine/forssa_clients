@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold, GroupShuffleSplit, StratifiedGroupKFold, StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 
 from . import config
-from .text_norm import normalize
+from .text_norm import normalize, normalize_strong
+from .utils import stable_hash
 
 
 @dataclass
@@ -36,12 +36,15 @@ def _detect_column(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     return None
 
 
-def stable_hash(text: str) -> str:
-    """Stable hash for grouping duplicates/near-duplicates.
-
-    We hash the *normalized* text to avoid leakage across folds.
-    """
-    return hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
+PRODUCTION_GROUP_CANDIDATES = [
+    "Réseau Social",
+    "reseau_social",
+    "channel",
+    "source",
+    "platform",
+    "origine",
+    "canal",
+]
 
 
 def _resolve_data_paths(data_dir: Path) -> tuple[Path, Path]:
@@ -120,6 +123,69 @@ def add_normalized_hash(df: pd.DataFrame, text_col: str, hash_col: str = "text_h
     return df
 
 
+def add_group_columns(df: pd.DataFrame, text_col: str) -> pd.DataFrame:
+    """Add duplicate/near-duplicate grouping columns.
+
+    - exact_group: stable_hash(normalize(text))
+    - strong_group: stable_hash(normalize_strong(text))
+
+    Assumes df[text_col] is already normalized via normalize().
+    """
+    df = df.copy()
+    df["exact_group"] = df[text_col].astype(str).apply(stable_hash)
+    df["strong_group"] = df[text_col].astype(str).apply(lambda x: stable_hash(normalize_strong(x)))
+    return df
+
+
+def make_groups(df: pd.DataFrame, *, mode: str = "exact") -> np.ndarray:
+    mode = (mode or "exact").strip().lower()
+    if mode not in {"exact", "strong"}:
+        raise ValueError("mode must be 'exact' or 'strong'")
+    col = "strong_group" if mode == "strong" else "exact_group"
+    if col not in df.columns:
+        raise ValueError(f"Missing group column {col}. Call add_group_columns() first.")
+    return df[col].astype(str).to_numpy()
+
+
+def _script_bucket(text: str) -> str:
+    # Very lightweight heuristic: arabic-dominant vs latin-dominant vs mixed
+    if not text:
+        return "mixed"
+    arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+    latin = sum(1 for ch in text if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+    letters = arabic + latin
+    if letters == 0:
+        return "mixed"
+    ar_ratio = arabic / letters
+    la_ratio = latin / letters
+    if ar_ratio >= 0.60:
+        return "arabic"
+    if la_ratio >= 0.60:
+        return "latin"
+    return "mixed"
+
+
+def _length_bucket(lengths: np.ndarray) -> np.ndarray:
+    # Buckets by quantiles (short/med/long)
+    q1 = float(np.quantile(lengths, 0.33))
+    q2 = float(np.quantile(lengths, 0.66))
+    out = np.zeros_like(lengths, dtype=int)
+    out[lengths > q1] = 1
+    out[lengths > q2] = 2
+    return out
+
+
+def _enforce_strong_leakage_check(strong_groups: np.ndarray, tr_idx: np.ndarray, va_idx: np.ndarray) -> None:
+    tr = set(strong_groups[tr_idx])
+    va = set(strong_groups[va_idx])
+    inter = tr.intersection(va)
+    if inter:
+        raise RuntimeError(
+            "Leakage detected: near-duplicate normalize_strong(text) appears in both train/valid in a fold. "
+            "Re-run with leakage-safe grouping mode strong (make_groups(mode='strong'))."
+        )
+
+
 def build_cv_splits(
     df: pd.DataFrame,
     schema: DataSchema,
@@ -127,28 +193,150 @@ def build_cv_splits(
     n_splits: int,
     seed: int,
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray]:
-    """Leakage-safe CV splits.
+    """Backward-compatible leakage-safe CV splits.
 
-    - groups are stable_hash(normalized_text)
-    - StratifiedGroupKFold
-    - Explicit check: no identical normalized text crosses train/valid
+    This function is kept for older modules and defaults to the most
+    conservative option: leakage-safe strategy with exact duplicate groups.
+    It also enforces the near-duplicate (normalize_strong) leakage check.
     """
-    df = add_normalized_hash(df, schema.text_col)
+    splits, groups = build_cv_splits_v2(
+        df,
+        schema,
+        n_splits=n_splits,
+        seed=seed,
+        split_strategy="leakage_safe",
+        group_mode="exact",
+        return_stats=False,
+    )
+    return splits, groups
+
+
+def build_cv_splits_v2(
+    df: pd.DataFrame,
+    schema: DataSchema,
+    *,
+    n_splits: int,
+    seed: int,
+    split_strategy: str = "leakage_safe",
+    group_mode: str = "exact",
+    return_stats: bool = False,
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray, dict[str, Any]] | tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray]:
+    df = add_group_columns(df, schema.text_col)
     y = df[schema.label_col].astype(int).to_numpy()
-    groups = df["text_hash"].to_numpy()
+    exact_groups = df["exact_group"].astype(str).to_numpy()
+    strong_groups = df["strong_group"].astype(str).to_numpy()
+    groups = make_groups(df, mode=group_mode)
 
-    skf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    split_strategy = (split_strategy or "leakage_safe").strip().lower()
+    if split_strategy not in {"leakage_safe", "production_like"}:
+        raise ValueError("split_strategy must be one of: leakage_safe, production_like")
+
+    fold_stats: list[dict[str, Any]] = []
     splits: list[tuple[np.ndarray, np.ndarray]] = []
-    text = df[schema.text_col].astype(str).to_numpy()
 
-    for tr_idx, va_idx in skf.split(df, y, groups=groups):
-        # Explicit leakage check (should always pass with group split)
-        tr_set = set(text[tr_idx])
-        va_set = set(text[va_idx])
-        if tr_set.intersection(va_set):
-            raise RuntimeError("Leakage detected: identical normalized text appears in both train/valid in a fold")
-        splits.append((tr_idx, va_idx))
+    if split_strategy == "leakage_safe":
+        skf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(df, y, groups=groups)):
+            _enforce_strong_leakage_check(strong_groups, tr_idx, va_idx)
+            splits.append((tr_idx, va_idx))
+            tr_exact = set(exact_groups[tr_idx])
+            va_exact = set(exact_groups[va_idx])
+            tr_strong = set(strong_groups[tr_idx])
+            va_strong = set(strong_groups[va_idx])
+            fold_stats.append(
+                {
+                    "fold": fold,
+                    "n_train": int(len(tr_idx)),
+                    "n_valid": int(len(va_idx)),
+                    "n_exact_groups_train": int(len(tr_exact)),
+                    "n_exact_groups_valid": int(len(va_exact)),
+                    "exact_duplicate_count_train": int(len(tr_idx) - len(tr_exact)),
+                    "exact_duplicate_count_valid": int(len(va_idx) - len(va_exact)),
+                    "n_strong_groups_train": int(len(tr_strong)),
+                    "n_strong_groups_valid": int(len(va_strong)),
+                    "strong_duplicate_count_train": int(len(tr_idx) - len(tr_strong)),
+                    "strong_duplicate_count_valid": int(len(va_idx) - len(va_strong)),
+                }
+            )
+    else:
+        # V2: production-like. First, try to split by a platform/channel column.
+        group_col = _detect_column(df, PRODUCTION_GROUP_CANDIDATES)
+        if group_col is not None:
+            g = df[group_col].fillna("").astype(str).str.strip().to_numpy()
+            unique = len(set(g))
+            if unique >= n_splits:
+                splitter = GroupKFold(n_splits=n_splits)
+                iterator = splitter.split(df, y, groups=g)
+            else:
+                splitter = GroupShuffleSplit(n_splits=n_splits, test_size=min(0.2, 1.0 / max(n_splits, 2)), random_state=seed)
+                iterator = splitter.split(df, y, groups=g)
 
+            for fold, (tr_idx, va_idx) in enumerate(iterator):
+                _enforce_strong_leakage_check(strong_groups, tr_idx, va_idx)
+                splits.append((tr_idx, va_idx))
+                tr_strong = set(strong_groups[tr_idx])
+                va_strong = set(strong_groups[va_idx])
+                fold_stats.append(
+                    {
+                        "fold": fold,
+                        "n_train": int(len(tr_idx)),
+                        "n_valid": int(len(va_idx)),
+                        "group_col": group_col,
+                        "n_groups_train": int(len(set(g[tr_idx]))),
+                        "n_groups_valid": int(len(set(g[va_idx]))),
+                        "n_strong_groups_train": int(len(tr_strong)),
+                        "n_strong_groups_valid": int(len(va_strong)),
+                        "strong_duplicate_count_train": int(len(tr_idx) - len(tr_strong)),
+                        "strong_duplicate_count_valid": int(len(va_idx) - len(va_strong)),
+                    }
+                )
+        else:
+            # Pseudo-production: stratify by (label + length bucket + script bucket)
+            text = df[schema.text_col].astype(str).to_numpy()
+            lengths = np.asarray([len(t) for t in text], dtype=float)
+            len_b = _length_bucket(lengths)
+            scr_b = np.asarray([_script_bucket(t) for t in text], dtype=object)
+            scr_map = {"arabic": 0, "latin": 1, "mixed": 2}
+            scr_i = np.asarray([scr_map.get(s, 2) for s in scr_b], dtype=int)
+            # Composite stratification key
+            strat_key = np.asarray([f"{int(lbl)}_{int(lb)}_{int(sb)}" for lbl, lb, sb in zip(y, len_b, scr_i)], dtype=object)
+
+            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            for fold, (tr_idx, va_idx) in enumerate(skf.split(df, strat_key)):
+                _enforce_strong_leakage_check(strong_groups, tr_idx, va_idx)
+                splits.append((tr_idx, va_idx))
+                tr_strong = set(strong_groups[tr_idx])
+                va_strong = set(strong_groups[va_idx])
+                fold_stats.append(
+                    {
+                        "fold": fold,
+                        "n_train": int(len(tr_idx)),
+                        "n_valid": int(len(va_idx)),
+                        "pseudo_production": True,
+                        "n_strat_keys_train": int(len(set(strat_key[tr_idx]))),
+                        "n_strat_keys_valid": int(len(set(strat_key[va_idx]))),
+                        "n_strong_groups_train": int(len(tr_strong)),
+                        "n_strong_groups_valid": int(len(va_strong)),
+                        "strong_duplicate_count_train": int(len(tr_idx) - len(tr_strong)),
+                        "strong_duplicate_count_valid": int(len(va_idx) - len(va_strong)),
+                    }
+                )
+
+    stats = {
+        "split_strategy": split_strategy,
+        "group_mode": group_mode,
+        "n_splits": int(n_splits),
+        "seed": int(seed),
+        "fold_stats": fold_stats,
+        "n_rows": int(len(df)),
+        "n_exact_groups": int(len(set(exact_groups))),
+        "n_strong_groups": int(len(set(strong_groups))),
+        "exact_duplicate_count": int(len(df) - len(set(exact_groups))),
+        "strong_duplicate_count": int(len(df) - len(set(strong_groups))),
+    }
+
+    if return_stats:
+        return splits, groups, stats
     return splits, groups
 
 

@@ -98,6 +98,39 @@ def normalize(text: Optional[str]) -> str:
     return t
 
 
+def normalize_strong(text: Optional[str]) -> str:
+    """Stronger normalization for near-duplicate matching (leakage defense).
+
+    This is NOT used for training features; it's only used to detect
+    duplicates/near-duplicates across folds.
+
+    Steps:
+    - start from normalize(text)
+    - lowercase latin (safe to apply to full string)
+    - remove <URL> and <USER>
+    - remove digits (latin + arabic-indic)
+    - remove punctuation/symbols
+    - collapse spaces
+    """
+    t = normalize(text)
+    if not t:
+        return ""
+
+    t = t.lower()
+    # Remove URL/user markers completely (do not contribute to matching)
+    t = t.replace("<url>", " ").replace("<user>", " ")
+    # Keep emoji token as a word (avoid <> being stripped as punctuation)
+    t = t.replace("<emoji>", " emoji ")
+
+    # Remove digits (0-9 and Arabic-Indic digits)
+    t = re.sub(r"[0-9\u0660-\u0669\u06F0-\u06F9]+", " ", t)
+
+    # Keep only letters and whitespace
+    t = "".join(ch if (ch.isalpha() or ch.isspace()) else " " for ch in t)
+    t = normalize_whitespace(t)
+    return t
+
+
 # Backwards-compat alias (older modules may import normalize_text)
 def normalize_text(text: Optional[str]) -> str:
     return normalize(text)

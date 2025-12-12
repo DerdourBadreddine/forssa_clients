@@ -14,9 +14,118 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 
 from . import config
-from .data_io import build_cv_splits, compute_class_weights, load_datasets
+from .data_io import build_cv_splits_v2, load_datasets
 from .metrics import macro_f1, probs_to_labels
 from .utils import assert_probs_ok, ensure_dir, json_dump, reorder_proba_columns, set_seed
+
+
+def _quick_probe_val_strategy(
+    train_df,
+    schema,
+    *,
+    split_strategy: str,
+    group_mode: str,
+    folds: int,
+    seed: int,
+) -> dict:
+    """Fast TF-IDF(LR) probe to compare validation strategies."""
+    splits, _, stats = build_cv_splits_v2(
+        train_df,
+        schema,
+        n_splits=folds,
+        seed=seed,
+        split_strategy=split_strategy,
+        group_mode=group_mode,
+        return_stats=True,
+    )
+
+    y = train_df[schema.label_col].astype(int).to_numpy()
+    text = train_df[schema.text_col].astype(str).to_numpy()
+
+    fold_f1 = []
+
+    # Smaller vectorizers for speed
+    vec_w = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),
+        min_df=2,
+        max_features=120_000,
+        sublinear_tf=True,
+        norm="l2",
+        strip_accents=None,
+    )
+    vec_c = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 6),
+        min_df=2,
+        max_features=180_000,
+        sublinear_tf=True,
+        norm="l2",
+    )
+
+    for fold, (tr_idx, va_idx) in enumerate(splits):
+        tr_text = text[tr_idx]
+        va_text = text[va_idx]
+        y_tr = y[tr_idx]
+        y_va = y[va_idx]
+
+        vec_w.fit(tr_text)
+        vec_c.fit(tr_text)
+        X_tr = hstack([vec_w.transform(tr_text), vec_c.transform(tr_text)]).tocsr()
+        X_va = hstack([vec_w.transform(va_text), vec_c.transform(va_text)]).tocsr()
+
+        clf = LogisticRegression(
+            solver="saga",
+            class_weight="balanced",
+            max_iter=3000,
+            n_jobs=max(1, (config.tfidf_config.n_jobs if hasattr(config, "tfidf_config") else 1)),
+            random_state=seed,
+            C=4.0,
+        )
+        clf.fit(X_tr, y_tr)
+        p_va = clf.predict_proba(X_va)
+        p_va = reorder_proba_columns(p_va, clf.classes_, config.LABELS)
+        y_pred = probs_to_labels(p_va, config.LABELS)
+        fold_f1.append(float(macro_f1(y_va, y_pred)))
+
+        # Attach per-fold score to fold_stats (keeps everything in one place)
+        if fold < len(stats.get("fold_stats", [])):
+            stats["fold_stats"][fold]["probe_macro_f1"] = float(fold_f1[-1])
+
+    mean = float(np.mean(fold_f1)) if fold_f1 else 0.0
+    std = float(np.std(fold_f1)) if fold_f1 else 0.0
+
+    return {
+        "split_strategy": split_strategy,
+        "group_mode": group_mode,
+        "fold_macro_f1": fold_f1,
+        "mean_macro_f1": mean,
+        "std_macro_f1": std,
+        "fold_stats": stats.get("fold_stats", []),
+        "n_rows": stats.get("n_rows"),
+        "n_exact_groups": stats.get("n_exact_groups"),
+        "n_strong_groups": stats.get("n_strong_groups"),
+    }
+
+
+def _choose_val_strategy(v1: dict, v2: dict) -> str:
+    """Choose the more conservative score unless it's much less stable."""
+    m1, s1 = float(v1["mean_macro_f1"]), float(v1["std_macro_f1"])
+    m2, s2 = float(v2["mean_macro_f1"]), float(v2["std_macro_f1"])
+
+    # Prefer lower (more conservative) mean.
+    if m1 < m2:
+        lower, higher = ("leakage_safe", m1, s1), ("production_like", m2, s2)
+    else:
+        lower, higher = ("production_like", m2, s2), ("leakage_safe", m1, s1)
+
+    lower_name, lower_mean, lower_std = lower
+    _, _, higher_std = higher
+
+    # If the conservative option is significantly less stable, pick the more stable one.
+    if lower_std > higher_std + 0.02:
+        return "production_like" if lower_name == "leakage_safe" else "leakage_safe"
+    return lower_name
 
 
 def build_vectorizers(
@@ -89,6 +198,8 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=config.SEED)
+    parser.add_argument("--val_strategy", choices=["auto", "leakage_safe", "production_like"], default="auto")
+    parser.add_argument("--group_mode", choices=["exact", "strong"], default="exact")
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--max-features-word", type=int, default=200_000)
     parser.add_argument("--max-features-char", type=int, default=300_000)
@@ -101,7 +212,50 @@ def main() -> None:
     text = train_df[schema.text_col].astype(str).to_numpy()
     test_text = test_df[schema.text_col].astype(str).to_numpy()
 
-    splits, _ = build_cv_splits(train_df, schema, n_splits=args.folds, seed=args.seed)
+    # Validation strategy selection (gap-fix)
+    chosen_strategy = args.val_strategy
+    validation_report = {
+        "chosen_strategy": None,
+        "group_mode": args.group_mode,
+        "v1_leakage_safe": None,
+        "v2_production_like": None,
+    }
+    if args.val_strategy == "auto":
+        v1 = _quick_probe_val_strategy(
+            train_df,
+            schema,
+            split_strategy="leakage_safe",
+            group_mode=args.group_mode,
+            folds=args.folds,
+            seed=args.seed,
+        )
+        v2 = _quick_probe_val_strategy(
+            train_df,
+            schema,
+            split_strategy="production_like",
+            group_mode=args.group_mode,
+            folds=args.folds,
+            seed=args.seed,
+        )
+        chosen_strategy = _choose_val_strategy(v1, v2)
+        validation_report["v1_leakage_safe"] = v1
+        validation_report["v2_production_like"] = v2
+        validation_report["chosen_strategy"] = chosen_strategy
+        json_dump(validation_report, config.OUTPUT_DIR / "validation_report.json")
+        print("Validation strategy (auto) selected:", chosen_strategy)
+    else:
+        validation_report["chosen_strategy"] = chosen_strategy
+        json_dump(validation_report, config.OUTPUT_DIR / "validation_report.json")
+
+    splits, _ = build_cv_splits_v2(
+        train_df,
+        schema,
+        n_splits=args.folds,
+        seed=args.seed,
+        split_strategy=chosen_strategy,
+        group_mode=args.group_mode,
+        return_stats=False,
+    )
 
     n_train = len(train_df)
     n_test = len(test_df)
@@ -172,7 +326,13 @@ def main() -> None:
         np.save(out, arr)
 
     # Report
-    summary = {"schema": schema.__dict__, "folds": args.folds, "seed": args.seed}
+    summary = {
+        "schema": schema.__dict__,
+        "folds": args.folds,
+        "seed": args.seed,
+        "val_strategy": chosen_strategy,
+        "group_mode": args.group_mode,
+    }
     for name, probs in oof.items():
         y_pred = probs_to_labels(probs, config.LABELS)
         summary[f"oof_macro_f1_{name}"] = macro_f1(y, y_pred)

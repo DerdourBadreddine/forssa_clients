@@ -45,10 +45,13 @@ drive.mount('/content/drive')
 !pip install -r requirements.txt --no-cache-dir
 
 # 1) TF‑IDF CV
-!python -m src.train_tfidf_cv --folds 5 --seed 42
+!python -m src.drift_detector
 
-# 2) Transformer CV (XLM‑R)
-!python -m src.train_transformer_cv --model_id xlm-roberta-base --folds 5 --seed 42
+# 2) TF‑IDF CV (auto validation selection)
+!python -m src.train_tfidf_cv --val_strategy auto --folds 5 --seed 42
+
+# 3) Transformer CV (XLM‑R) (auto validation selection)
+!python -m src.train_transformer_cv --model_id xlm-roberta-base --val_strategy auto --folds 5 --seed 42
 
 # 3) Transformer CV (DziriBERT) – YOU MUST set the real HF model id
 !python -m src.train_transformer_cv --model_id CHANGE_ME_DZIRIBERT_MODEL_ID --folds 5 --seed 42

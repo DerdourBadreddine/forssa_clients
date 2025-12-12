@@ -9,6 +9,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from datasets import Dataset
+from scipy.sparse import hstack
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -19,7 +22,7 @@ from transformers import (
 )
 
 from . import config
-from .data_io import build_cv_splits, compute_class_weights, load_datasets
+from .data_io import build_cv_splits_v2, compute_class_weights, load_datasets
 from .metrics import macro_f1, probs_to_labels
 from .utils import (
     assert_probs_ok,
@@ -28,6 +31,7 @@ from .utils import (
     safe_model_id,
     set_seed,
     softmax,
+    json_load,
 )
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -125,6 +129,145 @@ def _maybe_dapt_checkpoint(model_id: str, use_dapt: bool) -> str | Path:
     return dapt_path
 
 
+def _quick_probe_val_strategy(
+    train_df,
+    schema,
+    *,
+    split_strategy: str,
+    group_mode: str,
+    folds: int,
+    seed: int,
+) -> dict:
+    splits, _, stats = build_cv_splits_v2(
+        train_df,
+        schema,
+        n_splits=folds,
+        seed=seed,
+        split_strategy=split_strategy,
+        group_mode=group_mode,
+        return_stats=True,
+    )
+
+    y = train_df[schema.label_col].astype(int).to_numpy()
+    text = train_df[schema.text_col].astype(str).to_numpy()
+
+    fold_f1 = []
+
+    vec_w = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),
+        min_df=2,
+        max_features=120_000,
+        sublinear_tf=True,
+        norm="l2",
+        strip_accents=None,
+    )
+    vec_c = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 6),
+        min_df=2,
+        max_features=180_000,
+        sublinear_tf=True,
+        norm="l2",
+    )
+
+    for fold, (tr_idx, va_idx) in enumerate(splits):
+        tr_text = text[tr_idx]
+        va_text = text[va_idx]
+        y_tr = y[tr_idx]
+        y_va = y[va_idx]
+
+        vec_w.fit(tr_text)
+        vec_c.fit(tr_text)
+        X_tr = hstack([vec_w.transform(tr_text), vec_c.transform(tr_text)]).tocsr()
+        X_va = hstack([vec_w.transform(va_text), vec_c.transform(va_text)]).tocsr()
+
+        clf = LogisticRegression(
+            solver="saga",
+            class_weight="balanced",
+            max_iter=3000,
+            n_jobs=1,
+            random_state=seed,
+            C=4.0,
+        )
+        clf.fit(X_tr, y_tr)
+        p_va = clf.predict_proba(X_va)
+        # reorder to canonical labels
+        from .utils import reorder_proba_columns
+
+        p_va = reorder_proba_columns(p_va, clf.classes_, config.LABELS)
+        y_pred = probs_to_labels(p_va, config.LABELS)
+        fold_f1.append(float(macro_f1(y_va, y_pred)))
+        if fold < len(stats.get("fold_stats", [])):
+            stats["fold_stats"][fold]["probe_macro_f1"] = float(fold_f1[-1])
+
+    return {
+        "split_strategy": split_strategy,
+        "group_mode": group_mode,
+        "fold_macro_f1": fold_f1,
+        "mean_macro_f1": float(np.mean(fold_f1)) if fold_f1 else 0.0,
+        "std_macro_f1": float(np.std(fold_f1)) if fold_f1 else 0.0,
+        "fold_stats": stats.get("fold_stats", []),
+        "n_rows": stats.get("n_rows"),
+        "n_exact_groups": stats.get("n_exact_groups"),
+        "n_strong_groups": stats.get("n_strong_groups"),
+    }
+
+
+def _choose_val_strategy(v1: dict, v2: dict) -> str:
+    m1, s1 = float(v1["mean_macro_f1"]), float(v1["std_macro_f1"])
+    m2, s2 = float(v2["mean_macro_f1"]), float(v2["std_macro_f1"])
+    if m1 < m2:
+        lower_name, lower_std, higher_std = "leakage_safe", s1, s2
+    else:
+        lower_name, lower_std, higher_std = "production_like", s2, s1
+    if lower_std > higher_std + 0.02:
+        return "production_like" if lower_name == "leakage_safe" else "leakage_safe"
+    return lower_name
+
+
+def _resolve_val_strategy(train_df, schema, *, requested: str, group_mode: str, folds: int, seed: int) -> str:
+    requested = (requested or "auto").strip().lower()
+    report_path = config.OUTPUT_DIR / "validation_report.json"
+    if requested == "auto" and report_path.exists():
+        rep = json_load(report_path)
+        chosen = rep.get("chosen_strategy")
+        if chosen in {"leakage_safe", "production_like"}:
+            return str(chosen)
+
+    if requested in {"leakage_safe", "production_like"}:
+        return requested
+
+    # Compute probe if missing
+    v1 = _quick_probe_val_strategy(
+        train_df,
+        schema,
+        split_strategy="leakage_safe",
+        group_mode=group_mode,
+        folds=folds,
+        seed=seed,
+    )
+    v2 = _quick_probe_val_strategy(
+        train_df,
+        schema,
+        split_strategy="production_like",
+        group_mode=group_mode,
+        folds=folds,
+        seed=seed,
+    )
+    chosen = _choose_val_strategy(v1, v2)
+    json_dump(
+        {
+            "chosen_strategy": chosen,
+            "group_mode": group_mode,
+            "v1_leakage_safe": v1,
+            "v2_production_like": v2,
+        },
+        report_path,
+    )
+    return chosen
+
+
 def run_transformer_cv(
     *,
     model_id: str,
@@ -132,6 +275,8 @@ def run_transformer_cv(
     data_dir: Optional[Path],
     folds: int,
     seeds: List[int],
+    val_strategy: str,
+    group_mode: str,
     max_len: int,
     train_bs: int,
     eval_bs: int,
@@ -151,7 +296,24 @@ def run_transformer_cv(
     y_labels = train_df[schema.label_col].astype(int).to_numpy()
     y_internal = (y_labels - 1).astype(int)  # 0..8
 
-    splits, _ = build_cv_splits(train_df, schema, n_splits=folds, seed=seeds[0])
+    chosen_val_strategy = _resolve_val_strategy(
+        train_df,
+        schema,
+        requested=val_strategy,
+        group_mode=group_mode,
+        folds=folds,
+        seed=seeds[0],
+    )
+
+    splits, _ = build_cv_splits_v2(
+        train_df,
+        schema,
+        n_splits=folds,
+        seed=seeds[0],
+        split_strategy=chosen_val_strategy,
+        group_mode=group_mode,
+        return_stats=False,
+    )
 
     safe_id = safe_model_id(run_id if run_id else model_id)
     model_root = ensure_dir(output_root / safe_id)
@@ -294,6 +456,8 @@ def run_transformer_cv(
         "schema": schema.__dict__,
         "folds": folds,
         "seeds": seeds,
+        "val_strategy": chosen_val_strategy,
+        "group_mode": group_mode,
         "use_dapt": bool(use_dapt),
         "max_len": max_len,
         "train_bs": train_bs,
@@ -324,6 +488,8 @@ def main() -> None:
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=config.SEED)
     parser.add_argument("--seeds", type=str, default="")
+    parser.add_argument("--val_strategy", choices=["auto", "leakage_safe", "production_like"], default="auto")
+    parser.add_argument("--group_mode", choices=["exact", "strong"], default="exact")
     parser.add_argument("--max_len", type=int, default=256)
     parser.add_argument("--train_bs", type=int, default=8)
     parser.add_argument("--eval_bs", type=int, default=16)
@@ -348,6 +514,8 @@ def main() -> None:
         data_dir=args.data_dir,
         folds=args.folds,
         seeds=seeds,
+        val_strategy=args.val_strategy,
+        group_mode=args.group_mode,
         max_len=args.max_len,
         train_bs=args.train_bs,
         eval_bs=args.eval_bs,
