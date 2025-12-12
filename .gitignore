@@ -1,0 +1,21 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Local artifacts
+outputs/
+artifacts/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
