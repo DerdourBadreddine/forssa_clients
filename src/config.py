@@ -37,18 +37,18 @@ NUM_CLASSES = len(LABELS)
 # TF-IDF settings
 @dataclass
 class TfidfConfig:
-    min_df: int = 3
-    max_features_word: int = 60000
-    max_features_char: int = 120000
-    word_ngrams: tuple[int, int] = (1, 2)
-    char_ngrams: tuple[int, int] = (3, 6)
+    min_df: int = 2
+    max_features_word: int = 120000
+    max_features_char: int = 250000
+    word_ngrams: tuple[int, int] = (1, 3)
+    char_ngrams: tuple[int, int] = (3, 7)
     use_idf: bool = True
     smooth_idf: bool = True
     sublinear_tf: bool = True
     normalize: str = "l2"
     solver: str = "lbfgs"
-    C: float = 4.0
-    max_iter: int = 1000
+    C: float = 6.0
+    max_iter: int = 2000
     n_jobs: int = max(os.cpu_count() - 1, 1)
     cv_folds: int = 5
     test_size: float = 0.15
@@ -58,20 +58,20 @@ class TfidfConfig:
 @dataclass
 class TransformerConfig:
     model_name: str = "xlm-roberta-base"
-    max_length: int = 224
-    train_batch_size: int = 16
-    eval_batch_size: int = 32
+    max_length: int = 256
+    train_batch_size: int = 8
+    eval_batch_size: int = 16
     learning_rate: float = 2e-5
-    weight_decay: float = 0.01
-    num_train_epochs: int = 3
-    warmup_ratio: float = 0.06
+    weight_decay: float = 0.05
+    num_train_epochs: int = 4
+    warmup_ratio: float = 0.1
     logging_steps: int = 50
-    eval_steps: int = 200
+    eval_steps: int = 100
     save_total_limit: int = 1
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 2
     early_stopping_patience: int = 2
-    label_smoothing: float = 0.0
-    fp16: bool = False
+    label_smoothing: float = 0.05
+    fp16: bool = True
 
 
 tfidf_config = TfidfConfig()

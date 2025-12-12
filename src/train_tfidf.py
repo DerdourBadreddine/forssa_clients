@@ -12,7 +12,7 @@ import numpy as np
 from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold, cross_val_score
 from sklearn.svm import LinearSVC
 
 from . import config
@@ -51,7 +51,7 @@ def build_vectorizers() -> Tuple[TfidfVectorizer, TfidfVectorizer]:
     return word_vec, char_vec
 
 
-def train_and_eval(train_texts, train_labels, val_texts, val_labels, class_weights: Dict[int, float]):
+def train_and_eval(train_texts, train_labels, val_texts, val_labels, class_weights: Dict[int, float], cv_groups=None):
     cfg = config.tfidf_config
     word_vec, char_vec = build_vectorizers()
 
@@ -74,8 +74,20 @@ def train_and_eval(train_texts, train_labels, val_texts, val_labels, class_weigh
 
     results = {}
     for name, model in models.items():
-        cv = StratifiedKFold(n_splits=cfg.cv_folds, shuffle=True, random_state=config.SEED)
-        cv_scores = cross_val_score(model, X_train, train_labels, cv=cv, scoring="f1_macro", n_jobs=cfg.n_jobs)
+        if cv_groups is None:
+            cv = StratifiedKFold(n_splits=cfg.cv_folds, shuffle=True, random_state=config.SEED)
+            cv_scores = cross_val_score(model, X_train, train_labels, cv=cv, scoring="f1_macro", n_jobs=cfg.n_jobs)
+        else:
+            cv = StratifiedGroupKFold(n_splits=cfg.cv_folds, shuffle=True, random_state=config.SEED)
+            cv_scores = cross_val_score(
+                model,
+                X_train,
+                train_labels,
+                cv=cv,
+                scoring="f1_macro",
+                n_jobs=cfg.n_jobs,
+                groups=cv_groups,
+            )
         model.fit(X_train, train_labels)
         val_pred = model.predict(X_val)
         val_f1 = macro_f1(val_labels, val_pred)
@@ -116,6 +128,12 @@ def main():
     train_df, _, schema = load_datasets(args.data_dir)
     train_df, val_df = stratified_leakage_safe_split(train_df, schema, test_size=args.test_size, seed=config.SEED)
 
+    # Group ids for CV to avoid leaking near-duplicates
+    from .data_io import add_normalized_hash
+
+    hashed = add_normalized_hash(train_df, schema.text_col)
+    train_hashes = hashed["text_hash"].values
+
     class_weights = compute_class_weights(train_df[schema.label_col])
 
     results, word_vec, char_vec = train_and_eval(
@@ -124,6 +142,7 @@ def main():
         val_df[schema.text_col].tolist(),
         val_df[schema.label_col].astype(int).values,
         class_weights,
+        cv_groups=train_hashes,
     )
 
     # Pick best by validation macro f1

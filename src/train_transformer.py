@@ -24,6 +24,11 @@ from . import config
 from .data_io import compute_class_weights, load_datasets, stratified_leakage_safe_split
 from .metrics import macro_f1
 
+# Disable wandb prompts by default
+os.environ.setdefault("WANDB_DISABLED", "true")
+os.environ.setdefault("WANDB_MODE", "disabled")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
