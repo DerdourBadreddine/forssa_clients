@@ -168,8 +168,7 @@ def main():
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     score = float(best.get("best_score", 0.0))
-    tag = f"exp_{best['exp']}_{args.mode}"
-    out_name = f"submission_{tag}_cv{score:.4f}_{ts}.csv"
+    out_name = f"submission_{args.mode}_{best['exp']}_{ts}.csv"
     out_path = config.OUTPUT_DIR / out_name
 
     # Kaggle expects the column name exactly "id"

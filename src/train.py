@@ -21,7 +21,7 @@ from sklearn.linear_model import SGDClassifier
 from . import config
 from .data_io import add_normalized_hash, compute_class_weights, load_datasets
 from .exp_utils import ensure_dir, run_id, set_global_seed, write_json, append_jsonl
-from .proba_utils import assert_proba_is_canonical, predict_proba_canonical
+from .proba_utils import assert_proba_is_canonical, predict_proba_canonical, reorder_proba_to_canonical
 
 
 @dataclass
@@ -132,10 +132,13 @@ def train_oof_tfidf(
     n = len(y)
     n_classes = len(config.LABELS)
 
-    # OOF probs per model family
+    # OOF probs per model family (averaged across seeds)
     oof_logreg = np.zeros((n, n_classes), dtype=np.float32)
     oof_sgd = np.zeros((n, n_classes), dtype=np.float32)
     oof_nbsvm = np.zeros((n, n_classes), dtype=np.float32)
+
+    # Per-seed OOF scores for stability reporting
+    seed_scores: Dict[str, List[float]] = {"logreg": [], "sgd": [], "nbsvm": []}
 
     fold_scores: Dict[str, List[float]] = {"logreg": [], "sgd": [], "nbsvm": []}
     metric_fn = _metric_fn(opt_metric)
@@ -143,6 +146,12 @@ def train_oof_tfidf(
     for seed in seeds:
         set_global_seed(seed)
         cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+        # Seed-specific OOF (not averaged)
+        seed_oof_logreg = np.zeros((n, n_classes), dtype=np.float32)
+        seed_oof_sgd = np.zeros((n, n_classes), dtype=np.float32)
+        seed_oof_nbsvm = np.zeros((n, n_classes), dtype=np.float32)
+
         for fold, (tr_idx, va_idx) in enumerate(cv.split(np.zeros(n), y, groups)):
             tr_text = [train_text[i] for i in tr_idx]
             va_text = [train_text[i] for i in va_idx]
@@ -178,6 +187,7 @@ def train_oof_tfidf(
             p = predict_proba_canonical(logreg, X_va, CANONICAL)
             assert_proba_is_canonical(p, CANONICAL)
             oof_logreg[va_idx] += p / len(seeds)
+            seed_oof_logreg[va_idx] = p
             fold_scores["logreg"].append(metric_fn(y_va, logreg.predict(X_va)))
 
             # 2) SGD log-loss
@@ -194,11 +204,10 @@ def train_oof_tfidf(
             # Use canonical reordering (never assume column order)
             p2_raw = _predict_proba_from_sgd(sgd, X_va)
             # _predict_proba_from_sgd returns columns in sgd.classes_ order
-            from .proba_utils import reorder_proba_to_canonical
-
             p2 = reorder_proba_to_canonical(p2_raw, sgd.classes_, CANONICAL)
             assert_proba_is_canonical(p2, CANONICAL)
             oof_sgd[va_idx] += p2 / len(seeds)
+            seed_oof_sgd[va_idx] = p2
             fold_scores["sgd"].append(metric_fn(y_va, sgd.predict(X_va)))
 
             # 3) NB-SVM-ish: scale then LogReg
@@ -221,7 +230,13 @@ def train_oof_tfidf(
             p3 = predict_proba_canonical(nbsvm, X_va_nb, CANONICAL)
             assert_proba_is_canonical(p3, CANONICAL)
             oof_nbsvm[va_idx] += p3 / len(seeds)
+            seed_oof_nbsvm[va_idx] = p3
             fold_scores["nbsvm"].append(metric_fn(y_va, nbsvm.predict(X_va_nb)))
+
+        # Seed-level stability scores
+        seed_scores["logreg"].append(macro_f1(y, np.array(CANONICAL)[np.argmax(seed_oof_logreg, axis=1)]))
+        seed_scores["sgd"].append(macro_f1(y, np.array(CANONICAL)[np.argmax(seed_oof_sgd, axis=1)]))
+        seed_scores["nbsvm"].append(macro_f1(y, np.array(CANONICAL)[np.argmax(seed_oof_nbsvm, axis=1)]))
 
     # Aggregate OOF scores using argmax
     y_pred_logreg = np.array(config.LABELS)[np.argmax(oof_logreg, axis=1)]
@@ -318,6 +333,8 @@ def train_oof_tfidf(
         "best_blend": best_blend,
         "opt_metric": opt_metric,
         "blend_trials": int(blend_trials),
+        "seed_scores": {k: {"mean": float(np.mean(v)), "std": float(np.std(v)), "values": [float(x) for x in v]} for k, v in seed_scores.items()},
+        "oof_probs": {"logreg": oof_logreg, "sgd": oof_sgd, "nbsvm": oof_nbsvm},
     }
 
 
@@ -459,6 +476,12 @@ def main():
 
     results = train_oof_tfidf(texts, social_values, y, groups, spec, seeds, args.folds, out_dir, args.opt_metric, args.blend_trials)
 
+    # Save y_true and per-model OOF probabilities for downstream blending/analysis
+    np.save(out_dir / "y_true.npy", y.astype(int))
+    oof_probs = results.get("oof_probs", {})
+    for k, v in oof_probs.items():
+        np.save(out_dir / f"oof_{k}.npy", v)
+
     # Persist experiment log
     summary = {
         "exp": exp,
@@ -470,6 +493,8 @@ def main():
         "oof_scores_diag": results.get("oof_scores_diag", {}),
         "fold_scores": results["fold_scores"],
         "best_blend": results["best_blend"],
+        "seed_scores": results.get("seed_scores", {}),
+        "blend_trials": int(args.blend_trials),
     }
     write_json(out_dir / "summary.json", summary)
     append_jsonl(config.EXPERIMENTS_DIR / "experiments.jsonl", summary)
