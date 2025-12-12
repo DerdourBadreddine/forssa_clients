@@ -13,6 +13,10 @@ regex>=2023.12.25
 torch>=2.1.0
 transformers==4.38.2
 datasets==2.17.0
-accelerate==0.27.2
+# NOTE: transformers.Trainer will import peft if installed. Colab sometimes has a newer peft
+# preinstalled, which can break if accelerate is too old (missing clear_device_cache).
+# Pin a compatible pair to avoid that runtime crash.
+accelerate==0.30.1
+peft==0.10.0
 sentencepiece>=0.1.99
 safetensors>=0.4.0

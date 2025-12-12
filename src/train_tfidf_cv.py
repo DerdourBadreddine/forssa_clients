@@ -71,7 +71,6 @@ def _train_fold_models(
     # 2) Multinomial LogisticRegression
     logreg = LogisticRegression(
         solver="saga",
-        multi_class="multinomial",
         class_weight="balanced",
         max_iter=5000,
         n_jobs=max(1, (config.tfidf_config.n_jobs if hasattr(config, "tfidf_config") else 1)),

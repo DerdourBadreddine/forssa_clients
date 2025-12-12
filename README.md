@@ -3,6 +3,7 @@
 Competition-grade, reproducible pipeline for multilingual/noisy Algerian customer comments (Darija/Arabizi/Arabic/French/English) → labels 1..9.
 
 This repo implements:
+
 - Leakage-safe CV (duplicate/near-duplicate defense via normalized-text hashing + StratifiedGroupKFold)
 - Strong TF‑IDF baselines (char_wb + word) with CV OOF/test probabilities
 - Transformer CV fine-tuning (XLM‑R / DeBERTa / DziriBERT via user-provided model id)
@@ -13,15 +14,17 @@ This repo implements:
 ## Data
 
 Required paths:
+
 - `data/forsa-client-satisfaction/train.csv`
 - `data/forsa-client-satisfaction/test.csv`
 
 Notes:
+
 - The code also accepts legacy `test_file.csv` if present.
 - Column auto-detection:
-	- id: `id` or `ID`
-	- text: `comment`, `text`, `message`, `content`, `Commentaire client`, `Commentaire_client`
-	- label: `Class`, `label`, `target`, `class`
+  - id: `id` or `ID`
+  - text: `comment`, `text`, `message`, `content`, `Commentaire client`, `Commentaire_client`
+  - label: `Class`, `label`, `target`, `class`
 
 ## Colab (GPU) – exact commands
 
@@ -34,6 +37,10 @@ drive.mount('/content/drive')
 
 # Put train.csv + test.csv under:
 # data/forsa-client-satisfaction/
+
+!pip uninstall -y peft accelerate
+# If you previously installed conflicting versions, restart once:
+# Runtime -> Restart runtime
 
 !pip install -r requirements.txt --no-cache-dir
 
