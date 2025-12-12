@@ -79,3 +79,12 @@ python -m src.error_analysis
 - If you modify hyperparameters, update `src/config.py`.
 - To skip retraining when re-running selection: `python -m src.select_best --skip-train`.
 - Ensure labels remain in [1..9]; the transformer internally maps to 0..8 but maps back on inference.
+
+## Leaderboard-oriented workflow (recommended)
+
+This workflow uses repeated StratifiedGroupKFold (grouped by normalized text hash) to generate out-of-fold (OOF) predictions and a simple blend, which is typically a better proxy for Kaggle than a single holdout.
+
+```bash
+python -m src.train --seeds 42,43,44 --folds 5
+python -m src.make_submission --mode blend
+```

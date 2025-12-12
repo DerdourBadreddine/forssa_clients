@@ -14,6 +14,7 @@ DATA_DIR = PROJECT_ROOT / "data" / "forsa-clients-satisfaction"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 TFIDF_DIR = ARTIFACTS_DIR / "tfidf"
 TRANSFORMER_DIR = ARTIFACTS_DIR / "transformer"
+EXPERIMENTS_DIR = ARTIFACTS_DIR / "experiments"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 OUTPUT_SUBMISSION = OUTPUT_DIR / "submission.csv"
 SELECTION_FILE = ARTIFACTS_DIR / "selected_model.txt"
@@ -78,5 +79,5 @@ tfidf_config = TfidfConfig()
 transformer_config = TransformerConfig()
 
 # Ensure directories exist
-for path in [ARTIFACTS_DIR, TFIDF_DIR, TRANSFORMER_DIR, OUTPUT_DIR]:
+for path in [ARTIFACTS_DIR, TFIDF_DIR, TRANSFORMER_DIR, EXPERIMENTS_DIR, OUTPUT_DIR]:
     path.mkdir(parents=True, exist_ok=True)
