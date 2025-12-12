@@ -67,7 +67,6 @@ def train_and_eval(train_texts, train_labels, val_texts, val_labels, class_weigh
             C=cfg.C,
             solver=cfg.solver,
             n_jobs=cfg.n_jobs,
-            multi_class="multinomial",
             class_weight=class_weights,
         ),
         "linearsvc": LinearSVC(class_weight=class_weights),
