@@ -1,103 +1,81 @@
-# Multilingual Customer Comments Classification
+# FORSA 2025 – Clients Satisfaction (9-class Macro‑F1)
 
-End-to-end pipeline for the Kaggle multilingual Algerian customer comments challenge (9 classes). Handles noisy mixed-language text (Darija/Arabizi/Arabic/French/English) with both TF-IDF baselines and a transformer (XLM-R).
+Competition-grade, reproducible pipeline for multilingual/noisy Algerian customer comments (Darija/Arabizi/Arabic/French/English) → labels 1..9.
 
-## Repo layout
+This repo implements:
+- Leakage-safe CV (duplicate/near-duplicate defense via normalized-text hashing + StratifiedGroupKFold)
+- Strong TF‑IDF baselines (char_wb + word) with CV OOF/test probabilities
+- Transformer CV fine-tuning (XLM‑R / DeBERTa / DziriBERT via user-provided model id)
+- Optional DAPT (MLM) on train+test text
+- OOF blending weight search optimizing Macro‑F1
+- Bulletproof inference to `outputs/submission.csv`
 
-- `data/forsa-clients-satisfaction/` — expected CSVs (`train.csv`, `test_file.csv`).
-- `src/` — code (config, preprocessing, training, inference, analysis).
-- `artifacts/` — saved models and vectorizers (created after training).
-- `outputs/` — submission.csv written here.
-- `scripts/` — helper script for Colab runs.
+## Data
 
-## Quickstart
+Required paths:
+- `data/forsa-client-satisfaction/train.csv`
+- `data/forsa-client-satisfaction/test.csv`
 
-### Colab (GPU)
+Notes:
+- The code also accepts legacy `test_file.csv` if present.
+- Column auto-detection:
+	- id: `id` or `ID`
+	- text: `comment`, `text`, `message`, `content`, `Commentaire client`, `Commentaire_client`
+	- label: `Class`, `label`, `target`, `class`
+
+## Colab (GPU) – exact commands
 
 ```bash
-# 1) Mount Drive and clone (adjust folder if you prefer a different path)
 from google.colab import drive
 drive.mount('/content/drive')
 %cd /content
-!git clone https://github.com/DerdourBadreddine/forssa_clients.git
-%cd /content/forssa_clients
+!git clone <YOUR_REPO_URL>
+%cd /content/<YOUR_REPO_FOLDER>
 
-# 2) Place data
-# Ensure data/forsa-clients-satisfaction/train.csv and test_file.csv exist.
-# If your text column is "Commentaire client", the code auto-detects it.
+# Put train.csv + test.csv under:
+# data/forsa-client-satisfaction/
 
-# 3) Install deps
-!pip uninstall -y sentence-transformers gcsfs
 !pip install -r requirements.txt --no-cache-dir
 
-# If you still see import/version conflicts, restart the runtime once:
-# Runtime > Restart runtime
+# 1) TF‑IDF CV
+!python -m src.train_tfidf_cv --folds 5 --seed 42
 
-# 4) Train TF-IDF (fast)
-!python -m src.train_tfidf
+# 2) Transformer CV (XLM‑R)
+!python -m src.train_transformer_cv --model_id xlm-roberta-base --folds 5 --seed 42
 
-# 5) Train transformer (GPU, fp16 auto-enabled)
-!python -m src.train_transformer --report_to none
+# 3) Transformer CV (DziriBERT) – YOU MUST set the real HF model id
+!python -m src.train_transformer_cv --model_id CHANGE_ME_DZIRIBERT_MODEL_ID --folds 5 --seed 42
 
-# 6) Select best and infer
+# 4) Optional DAPT (MLM) then re-train transformer with --use_dapt
+!python -m src.dapt_mlm --model_id xlm-roberta-base
+!python -m src.train_transformer_cv --model_id xlm-roberta-base --use_dapt --folds 5 --seed 42
+
+# 5) Blend OOF + build blended test probs
+!python -m src.blend_oof
+
+# 6) Select best final approach (best single vs blend)
 !python -m src.select_best
-!python -m src.infer
 
-# Submission written to outputs/submission.csv
+# 7) Inference (writes outputs/submission.csv)
+!python -m src.infer --sanity-check
+
+# Optional: error analysis on OOF
+!python -m src.error_analysis --source blend
 ```
 
-### Local
+## Outputs (reproducibility)
+
+- `outputs/oof/*.npy`: OOF probabilities per model (shape `(n_train, 9)`)
+- `outputs/testprobs/*.npy`: test probabilities per model (shape `(n_test, 9)`)
+- `outputs/models/<model_id>/fold_k/seed_s/`: transformer checkpoints
+- `outputs/models/tfidf/fold_k/`: TF‑IDF vectorizers + fold models
+- `outputs/dapt/<model_id>/adapted/`: DAPT MLM checkpoint (optional)
+- `outputs/blend_weights.json`: best blending weights
+- `outputs/final_config.json`: chosen final ensemble config
+- `outputs/submission.csv`: final Kaggle submission (`id,Class`)
+
+## Packaging for “model + code submission”
 
 ```bash
-pip install -r requirements.txt
-python -m src.train_tfidf
-python -m src.train_transformer
-python -m src.select_best
-python -m src.infer
+zip -r artifacts_bundle.zip outputs src requirements.txt README.md
 ```
-
-Error analysis:
-
-```bash
-python -m src.error_analysis
-```
-
-## Key design points
-
-- Deterministic seeding via `config.SEED`.
-- Robust column auto-detection for `id`, `text`, `label` with clear errors if missing.
-- Text normalization: URL/user placeholders, hashtag preservation, whitespace/spacing cleanup, elongation reduction, light Arabic normalization, emoji preserved as `<EMOJI>`.
-- Leakage-resistant split: stratified; if duplicate normalized texts exist, switches to group-based split so identical texts do not cross train/val.
-- TF-IDF track: char_wb 3–6 and word 1–2 n-grams; Logistic Regression + Linear SVC with class weights, 5-fold CV, best saved.
-- Transformer track: XLM-R fine-tuning with class-weighted loss, early stopping on macro F1; saves model + tokenizer + metadata.
-
-## Outputs & artifacts
-
-- TF-IDF artifacts: `artifacts/tfidf/best_model.joblib` (+ meta JSONs).
-- Transformer artifacts: `artifacts/transformer/best/` (HF format + meta.json).
-- Selected best flag: `artifacts/selected_model.txt` ("tfidf" or "transformer").
-- Submission: `outputs/submission.csv`.
-
-## Tips
-
-- If you modify hyperparameters, update `src/config.py`.
-- To skip retraining when re-running selection: `python -m src.select_best --skip-train`.
-- Ensure labels remain in [1..9]; the transformer internally maps to 0..8 but maps back on inference.
-
-## Leaderboard-oriented workflow (recommended)
-
-This workflow uses repeated StratifiedGroupKFold (grouped by normalized text hash) to generate out-of-fold (OOF) predictions and a simple blend, which is typically a better proxy for Kaggle than a single holdout.
-
-```bash
-python -m src.train --seeds 42,43,44 --folds 5
-python -m src.make_submission --mode blend
-```
-
-If your Kaggle score doesn't correlate with CV, try optimizing accuracy instead of macro-F1 (common for competitions):
-
-```bash
-python -m src.train --seeds 42,43,44 --folds 5 --opt-metric accuracy
-python -m src.make_submission --mode blend
-```
-
-The training script can also use the optional `Réseau Social` column as a one-hot feature (default: `--use-social auto`).

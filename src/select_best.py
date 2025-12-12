@@ -1,72 +1,89 @@
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from . import config
+from .data_io import load_datasets
+from .metrics import macro_f1, probs_to_labels
+from .utils import assert_probs_ok, json_dump, json_load
+
+def _available_oof_sources() -> List[str]:
+    return sorted([p.stem for p in config.OOF_DIR.glob("*.npy")])
 
 
-def run_if_missing(path: Path, cmd: list[str]):
-    if path.exists():
-        return
-    print(f"Running: {' '.join(cmd)}")
-    subprocess.check_call(cmd)
-
-
-def load_best_tfidf_metric() -> Optional[float]:
-    metas = list(config.TFIDF_DIR.glob("*_meta.json"))
-    if not metas:
-        return None
-    best = None
-    for mp in metas:
-        with open(mp, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        score = data.get("val_macro_f1")
-        if score is None:
-            continue
-        if best is None or score > best:
-            best = score
-    return best
-
-
-def load_transformer_metric() -> Optional[float]:
-    meta_path = config.TRANSFORMER_DIR / "best" / "meta.json"
-    if not meta_path.exists():
-        return None
-    with open(meta_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("val_macro_f1")
+def _score_source(y: np.ndarray, probs: np.ndarray) -> float:
+    assert_probs_ok(probs, config.NUM_CLASSES)
+    pred = probs_to_labels(probs, config.LABELS)
+    return macro_f1(y, pred)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train both tracks and select the best model")
-    parser.add_argument("--skip-train", action="store_true", help="Skip training if artifacts already exist")
+    parser = argparse.ArgumentParser(description="Select best single model or blended ensemble and write outputs/final_config.json")
     args = parser.parse_args()
 
-    if not args.skip_train:
-        run_if_missing(config.TFIDF_DIR / "best_model.joblib", ["python", "-m", "src.train_tfidf"])
-        run_if_missing(config.TRANSFORMER_DIR / "best" / "meta.json", ["python", "-m", "src.train_transformer"])
+    train_df, _, schema = load_datasets(None)
+    y = train_df[schema.label_col].astype(int).to_numpy()
 
-    tfidf_score = load_best_tfidf_metric()
-    transformer_score = load_transformer_metric()
+    sources = _available_oof_sources()
+    if not sources:
+        raise FileNotFoundError("No OOF files found in outputs/oof. Train models first.")
 
-    if tfidf_score is None and transformer_score is None:
-        raise RuntimeError("No models trained. Run without --skip-train.")
+    scores: Dict[str, float] = {}
+    for s in sources:
+        p = np.load(config.OOF_DIR / f"{s}.npy")
+        scores[s] = _score_source(y, p)
 
-    best_name = None
-    best_score = -1.0
-    if tfidf_score is not None and tfidf_score > best_score:
-        best_name = "tfidf"
-        best_score = tfidf_score
-    if transformer_score is not None and transformer_score > best_score:
-        best_name = "transformer"
-        best_score = transformer_score
+    best_single = max(scores.items(), key=lambda kv: kv[1])
 
-    config.SELECTION_FILE.write_text(best_name, encoding="utf-8")
-    print(f"Selected best model: {best_name} (macro F1={best_score:.4f})")
+    best_mode = "single"
+    best_name = best_single[0]
+    best_score = float(best_single[1])
+    final_probs_path = str((config.TESTPROBS_DIR / f"{best_name}.npy").as_posix())
+
+    blend_score = None
+    blend_weights = None
+    if config.BLEND_WEIGHTS_PATH.exists() and (config.TESTPROBS_DIR / "blend.npy").exists():
+        bw = json_load(config.BLEND_WEIGHTS_PATH)
+        weights = bw.get("weights", {})
+        if isinstance(weights, dict) and weights:
+            # compute blended OOF score
+            blend = None
+            for src, w in weights.items():
+                if (config.OOF_DIR / f"{src}.npy").exists():
+                    p = np.load(config.OOF_DIR / f"{src}.npy")
+                    assert_probs_ok(p, config.NUM_CLASSES)
+                    blend = p * float(w) if blend is None else (blend + p * float(w))
+            if blend is not None:
+                blend_score = _score_source(y, blend)
+                blend_weights = weights
+                if blend_score > best_score:
+                    best_mode = "blend"
+                    best_name = "blend"
+                    best_score = float(blend_score)
+                    final_probs_path = str((config.TESTPROBS_DIR / "blend.npy").as_posix())
+
+    final = {
+        "mode": best_mode,
+        "selected": best_name,
+        "selected_oof_macro_f1": best_score,
+        "labels": config.LABELS,
+        "num_classes": config.NUM_CLASSES,
+        "schema": schema.__dict__,
+        "probs_path": final_probs_path,
+        "all_oof_scores": scores,
+    }
+    if blend_score is not None:
+        final["blend_oof_macro_f1"] = float(blend_score)
+    if blend_weights is not None:
+        final["blend_weights"] = blend_weights
+
+    json_dump(final, config.FINAL_CONFIG_PATH)
+    print("Selected:", best_mode, best_name, "OOF=", round(best_score, 6))
+    print("Wrote:", config.FINAL_CONFIG_PATH)
 
 
 if __name__ == "__main__":

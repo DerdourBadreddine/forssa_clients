@@ -1,112 +1,66 @@
 from __future__ import annotations
 
-import json
+import argparse
 from pathlib import Path
-from typing import List, Tuple
-from datetime import datetime
 
-import joblib
 import numpy as np
 import pandas as pd
-import torch
-from datasets import Dataset
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, DataCollatorWithPadding
-from scipy.sparse import hstack
 
 from . import config
-from .data_io import DataSchema, load_datasets
+from .data_io import load_datasets
+from .utils import assert_probs_ok, json_load
 
 
-def load_selection() -> str:
-    if config.SELECTION_FILE.exists():
-        return config.SELECTION_FILE.read_text(encoding="utf-8").strip()
-    # Default to tfidf if no selection
-    return "tfidf"
+def _sanity_check(sub: pd.DataFrame, test_len: int) -> None:
+    if list(sub.columns) != ["id", "Class"]:
+        raise ValueError("Submission must have EXACT columns: id,Class")
+    if len(sub) != test_len:
+        raise ValueError(f"Row count mismatch: submission={len(sub)} test={test_len}")
+    if sub["id"].isna().any():
+        raise ValueError("Submission has NaN ids")
+    if sub["Class"].isna().any():
+        raise ValueError("Submission has NaN classes")
+    if sub["id"].duplicated().any():
+        raise ValueError("Submission has duplicate ids")
+    if not sub["Class"].between(1, 9).all():
+        bad = sub.loc[~sub["Class"].between(1, 9), "Class"].unique().tolist()
+        raise ValueError(f"Class out of range 1..9: {bad}")
 
 
-def _tfidf_meta() -> Tuple[str, float]:
-    meta_path = config.TFIDF_DIR / "best_meta.json"
-    if not meta_path.exists():
-        return "tfidf", 0.0
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    model_name = meta.get("best_model", "tfidf")
-    score = float(meta.get("cv_macro_f1_mean", 0.0))
-    return model_name, score
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Inference using final ensemble config -> outputs/submission.csv")
+    parser.add_argument("--sanity-check", action="store_true")
+    args = parser.parse_args()
 
+    _, test_df, schema = load_datasets(None)
 
-def _transformer_meta() -> Tuple[str, float]:
-    meta_path = config.TRANSFORMER_DIR / "best" / "meta.json"
-    if not meta_path.exists():
-        return "transformer", 0.0
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    score = float(meta.get("val_macro_f1", 0.0))
-    return meta.get("model_name", "transformer"), score
+    if not config.FINAL_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {config.FINAL_CONFIG_PATH}. Run: python -m src.blend_oof; python -m src.select_best"
+        )
+    final = json_load(config.FINAL_CONFIG_PATH)
+    probs_path = Path(final["probs_path"])
+    if not probs_path.is_absolute():
+        probs_path = config.PROJECT_ROOT / probs_path
+    if not probs_path.exists():
+        raise FileNotFoundError(f"Missing probabilities file: {probs_path}")
 
+    probs = np.load(probs_path)
+    assert_probs_ok(probs, config.NUM_CLASSES)
 
-def predict_tfidf(test_df: pd.DataFrame) -> np.ndarray:
-    payload = joblib.load(config.TFIDF_DIR / "best_model.joblib")
-    model = payload["model"]
-    word_vec = payload["word_vectorizer"]
-    char_vec = payload["char_vectorizer"]
-    schema_dict = payload.get("schema")
-    schema = DataSchema(**schema_dict)
+    labels = np.asarray(final.get("labels", config.LABELS), dtype=int)
+    preds = labels[np.argmax(probs, axis=1)].astype(int)
 
-    X_test_word = word_vec.transform(test_df[schema.text_col])
-    X_test_char = char_vec.transform(test_df[schema.text_col])
-    X_test = hstack([X_test_word, X_test_char])
-    preds = model.predict(X_test)
-    return preds
+    # Kaggle expects column name exactly "id".
+    sub = pd.DataFrame({"id": test_df[schema.id_col].to_numpy(), "Class": preds})
 
+    if args.sanity_check:
+        _sanity_check(sub, len(test_df))
+        print("Sanity-check OK")
 
-def predict_transformer(test_df: pd.DataFrame) -> np.ndarray:
-    meta_path = config.TRANSFORMER_DIR / "best" / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError("Transformer artifacts missing. Run train_transformer.py")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    schema = DataSchema(**meta["schema"])
-
-    tokenizer = AutoTokenizer.from_pretrained(config.TRANSFORMER_DIR / "best")
-    model = AutoModelForSequenceClassification.from_pretrained(config.TRANSFORMER_DIR / "best")
-
-    def encode(batch):
-        return tokenizer(batch[schema.text_col], truncation=True, padding=False, max_length=config.transformer_config.max_length)
-
-    ds = Dataset.from_pandas(test_df[[schema.text_col]])
-    ds = ds.map(encode, batched=True, remove_columns=ds.column_names)
-
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    trainer = Trainer(model=model, tokenizer=tokenizer, data_collator=data_collator)
-    preds_output = trainer.predict(ds)
-    pred_ids = np.argmax(preds_output.predictions, axis=-1)
-    labels_map = np.array(config.LABELS)
-    return labels_map[pred_ids]
-
-
-def main():
-    _, test_df, schema = load_datasets()
-
-    model_choice = load_selection()
-    print(f"Using model: {model_choice}")
-
-    if model_choice == "transformer":
-        preds = predict_transformer(test_df)
-        model_name, score = _transformer_meta()
-    else:
-        preds = predict_tfidf(test_df)
-        model_name, score = _tfidf_meta()
-
-    submission = pd.DataFrame({
-        schema.id_col: test_df[schema.id_col],
-        "Class": preds.astype(int),
-    })
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"submission_{model_name}_cv{score:.4f}_{ts}.csv"
-    submission_path = config.OUTPUT_DIR / fname
-    submission.to_csv(submission_path, index=False)
-    print(f"Saved submission to {submission_path}")
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    sub.to_csv(config.OUTPUT_SUBMISSION, index=False)
+    print("Wrote:", config.OUTPUT_SUBMISSION)
 
 
 if __name__ == "__main__":

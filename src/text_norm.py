@@ -1,65 +1,103 @@
 from __future__ import annotations
 
 import re
-import regex as re2
-import emoji
+import unicodedata
 from typing import Optional
 
-# Regex patterns
-URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-MENTION_PATTERN = re.compile(r"@[\w_]+", re.UNICODE)
-HASHTAG_PATTERN = re.compile(r"#(\w+)")
-WHITESPACE_PATTERN = re.compile(r"\s+")
-PUNCT_SPACING_PATTERN = re.compile(r"([!?,.])")
-ELONG_PATTERN = re.compile(r"([A-Za-z\u0600-\u06FF])\1{2,}")
-ARABIC_DIACRITICS = re2.compile(r"[\u064b-\u0652\u0670\u0640]")
-ARABIC_ALEF_VARIANTS = re2.compile(r"[\u0622\u0623\u0625]")
+import emoji
+
+# NOTE: Keep normalization *light* (do not over-clean).
+
+URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+MENTION_RE = re.compile(r"@[A-Za-z0-9_]+", re.UNICODE)
+HASHTAG_RE = re.compile(r"#(\w+)")
+WS_RE = re.compile(r"\s+")
+
+# Mild elongation reduction: keep up to 4 repeats (coooooool -> cooool)
+ELONG_RE = re.compile(r"([A-Za-z\u0600-\u06FF])\1{3,}")
+
+# Arabic ranges / chars
+ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u0652\u0670]")
+TATWEEL = "\u0640"
+
+
+def _to_str(x: Optional[str]) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    return str(x)
 
 
 def replace_urls(text: str) -> str:
-    return URL_PATTERN.sub("<URL>", text)
+    return URL_RE.sub("<URL>", text)
 
 
 def replace_mentions(text: str) -> str:
-    return MENTION_PATTERN.sub("<USER>", text)
+    return MENTION_RE.sub("<USER>", text)
 
 
-def normalize_hashtags(text: str) -> str:
-    return HASHTAG_PATTERN.sub(r"\1", text)
+def keep_hashtag_word(text: str) -> str:
+    # Keep hashtag signal as token content (strip leading #)
+    return HASHTAG_RE.sub(r"\1", text)
 
 
 def replace_emojis(text: str) -> str:
-    return emoji.replace_emoji(text, replace="<EMOJI>")
+    # Keep signal with a single token
+    return emoji.replace_emoji(text, replace=" <EMOJI> ")
 
 
-def normalize_arabic(text: str) -> str:
-    text = ARABIC_DIACRITICS.sub("", text)
-    text = ARABIC_ALEF_VARIANTS.sub("ا", text)
+def reduce_elongation(text: str, max_repeat: int = 4) -> str:
+    return ELONG_RE.sub(lambda m: m.group(1) * max_repeat, text)
+
+
+def normalize_arabic_light(text: str) -> str:
+    # Remove diacritics + tatweel
+    text = ARABIC_DIACRITICS_RE.sub("", text)
+    text = text.replace(TATWEEL, "")
+
+    # Unify alef variants: أ/إ/آ -> ا
+    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    # ى -> ي
+    text = text.replace("ى", "ي")
+    # ؤ -> و
+    text = text.replace("ؤ", "و")
+    # ئ -> ي
+    text = text.replace("ئ", "ي")
     return text
 
 
-def reduce_elongation(text: str, max_repeat: int = 3) -> str:
-    return ELONG_PATTERN.sub(lambda m: m.group(1) * max_repeat, text)
+def normalize_whitespace(text: str) -> str:
+    return WS_RE.sub(" ", text).strip()
 
 
-def normalize_punctuation_spacing(text: str) -> str:
-    # Ensure space before punctuation is trimmed and after punctuation is spaced
-    text = PUNCT_SPACING_PATTERN.sub(r" \1 ", text)
-    return WHITESPACE_PATTERN.sub(" ", text).strip()
+def normalize(text: Optional[str]) -> str:
+    """Competition-safe normalization.
 
-
-def normalize_text(text: Optional[str]) -> str:
-    if text is None:
+    - Fill missing with ""
+    - Replace URLs -> <URL>
+    - Replace @mentions -> <USER>
+    - Convert emojis -> <EMOJI>
+    - Keep hashtag word (strip #)
+    - Mild elongation reduction
+    - Arabic light normalization
+    - Normalize whitespace
+    """
+    t = _to_str(text)
+    t = unicodedata.normalize("NFKC", t)
+    t = t.strip()
+    if not t:
         return ""
-    if not isinstance(text, str):
-        text = str(text)
+    t = replace_urls(t)
+    t = replace_mentions(t)
+    t = keep_hashtag_word(t)
+    t = replace_emojis(t)
+    t = normalize_arabic_light(t)
+    t = reduce_elongation(t)
+    t = normalize_whitespace(t)
+    return t
 
-    text = text.strip()
-    text = replace_urls(text)
-    text = replace_mentions(text)
-    text = normalize_hashtags(text)
-    text = replace_emojis(text)
-    text = normalize_arabic(text)
-    text = reduce_elongation(text)
-    text = normalize_punctuation_spacing(text)
-    return text
+
+# Backwards-compat alias (older modules may import normalize_text)
+def normalize_text(text: Optional[str]) -> str:
+    return normalize(text)

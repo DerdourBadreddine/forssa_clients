@@ -10,7 +10,21 @@ SEED: int = 42
 
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data" / "forsa-clients-satisfaction"
+DATA_DIR_CANDIDATES = [
+    PROJECT_ROOT / "data" / "forsa-client-satisfaction",  # requested
+    PROJECT_ROOT / "data" / "forsa-clients-satisfaction",  # legacy / existing workspace
+]
+
+
+def resolve_data_dir() -> Path:
+    for p in DATA_DIR_CANDIDATES:
+        if p.exists():
+            return p
+    # Default to requested path (even if missing) for clearer errors.
+    return DATA_DIR_CANDIDATES[0]
+
+
+DATA_DIR = resolve_data_dir()
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 TFIDF_DIR = ARTIFACTS_DIR / "tfidf"
 TRANSFORMER_DIR = ARTIFACTS_DIR / "transformer"
@@ -18,6 +32,14 @@ EXPERIMENTS_DIR = ARTIFACTS_DIR / "experiments"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 OUTPUT_SUBMISSION = OUTPUT_DIR / "submission.csv"
 SELECTION_FILE = ARTIFACTS_DIR / "selected_model.txt"
+
+# New, competition-grade outputs (requested)
+OOF_DIR = OUTPUT_DIR / "oof"
+TESTPROBS_DIR = OUTPUT_DIR / "testprobs"
+MODELS_DIR = OUTPUT_DIR / "models"
+DAPT_DIR = OUTPUT_DIR / "dapt"
+BLEND_WEIGHTS_PATH = OUTPUT_DIR / "blend_weights.json"
+FINAL_CONFIG_PATH = OUTPUT_DIR / "final_config.json"
 
 # Columns to try to auto-detect
 CANDIDATE_ID_COLS = ["id", "ID"]
@@ -29,8 +51,11 @@ CANDIDATE_TEXT_COLS = [
     "review",
     "body",
     "Commentaire client",  # dataset-specific french column
+    "Commentaire_client",
 ]
 CANDIDATE_LABEL_COLS = ["Class", "label", "target", "labels"]
+if "class" not in [c.lower() for c in CANDIDATE_LABEL_COLS]:
+    CANDIDATE_LABEL_COLS.append("class")
 
 # Optional auxiliary feature columns (categorical)
 CANDIDATE_SOCIAL_COLS = [
@@ -43,6 +68,14 @@ CANDIDATE_SOCIAL_COLS = [
 
 LABELS = list(range(1, 10))  # 1..9
 NUM_CLASSES = len(LABELS)
+
+# Transformers internal ids: 0..8; submission labels: 1..9
+LABEL2ID = {str(lbl): i for i, lbl in enumerate(LABELS)}
+ID2LABEL = {i: str(lbl) for i, lbl in enumerate(LABELS)}
+
+# Default transformer IDs
+DEFAULT_XLMR = "xlm-roberta-base"
+DEFAULT_DZIRIBERT_PLACEHOLDER = "CHANGE_ME_DZIRIBERT_MODEL_ID"
 
 # TF-IDF settings
 @dataclass
@@ -88,5 +121,15 @@ tfidf_config = TfidfConfig()
 transformer_config = TransformerConfig()
 
 # Ensure directories exist
-for path in [ARTIFACTS_DIR, TFIDF_DIR, TRANSFORMER_DIR, EXPERIMENTS_DIR, OUTPUT_DIR]:
+for path in [
+    ARTIFACTS_DIR,
+    TFIDF_DIR,
+    TRANSFORMER_DIR,
+    EXPERIMENTS_DIR,
+    OUTPUT_DIR,
+    OOF_DIR,
+    TESTPROBS_DIR,
+    MODELS_DIR,
+    DAPT_DIR,
+]:
     path.mkdir(parents=True, exist_ok=True)
