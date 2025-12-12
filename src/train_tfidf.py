@@ -116,6 +116,9 @@ def save_artifacts(model_name: str, model, word_vec, char_vec, schema_dict: dict
     # Save a symlink to best model for inference simplicity
     best_link = config.TFIDF_DIR / "best_model.joblib"
     joblib.dump(payload, best_link)
+    best_meta_link = config.TFIDF_DIR / "best_meta.json"
+    with open(best_meta_link, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
 
 
 def main():

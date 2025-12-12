@@ -187,6 +187,7 @@ def main():
         "id2label": id2label,
         "schema": schema.__dict__,
         "config": asdict(config.transformer_config),
+        "model_name": config.transformer_config.model_name,
     }
     with open(best_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

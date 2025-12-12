@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
+from datetime import datetime
 
 import joblib
 import numpy as np
@@ -21,6 +22,27 @@ def load_selection() -> str:
         return config.SELECTION_FILE.read_text(encoding="utf-8").strip()
     # Default to tfidf if no selection
     return "tfidf"
+
+
+def _tfidf_meta() -> Tuple[str, float]:
+    meta_path = config.TFIDF_DIR / "best_meta.json"
+    if not meta_path.exists():
+        return "tfidf", 0.0
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    model_name = meta.get("best_model", "tfidf")
+    score = float(meta.get("cv_macro_f1_mean", 0.0))
+    return model_name, score
+
+
+def _transformer_meta() -> Tuple[str, float]:
+    meta_path = config.TRANSFORMER_DIR / "best" / "meta.json"
+    if not meta_path.exists():
+        return "transformer", 0.0
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    score = float(meta.get("val_macro_f1", 0.0))
+    return meta.get("model_name", "transformer"), score
 
 
 def predict_tfidf(test_df: pd.DataFrame) -> np.ndarray:
@@ -71,14 +93,18 @@ def main():
 
     if model_choice == "transformer":
         preds = predict_transformer(test_df)
+        model_name, score = _transformer_meta()
     else:
         preds = predict_tfidf(test_df)
+        model_name, score = _tfidf_meta()
 
     submission = pd.DataFrame({
         schema.id_col: test_df[schema.id_col],
         "Class": preds.astype(int),
     })
-    submission_path = config.OUTPUT_SUBMISSION
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"submission_{model_name}_cv{score:.4f}_{ts}.csv"
+    submission_path = config.OUTPUT_DIR / fname
     submission.to_csv(submission_path, index=False)
     print(f"Saved submission to {submission_path}")
 
