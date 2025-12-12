@@ -159,6 +159,31 @@ def run_transformer_cv(
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     tokenizer.save_pretrained(model_root)
 
+    # Tokenize once (significant speed-up vs mapping inside every fold)
+    def encode_train(batch):
+        tok = tokenizer(
+            batch[schema.text_col],
+            truncation=True,
+            max_length=max_len,
+            padding=False,
+        )
+        tok["labels"] = (np.asarray(batch[schema.label_col], dtype=int) - 1).tolist()
+        return tok
+
+    def encode_test(batch):
+        return tokenizer(
+            batch[schema.text_col],
+            truncation=True,
+            max_length=max_len,
+            padding=False,
+        )
+
+    ds_full = Dataset.from_pandas(train_df[[schema.text_col, schema.label_col]])
+    ds_full = ds_full.map(encode_train, batched=True, remove_columns=ds_full.column_names)
+
+    ds_te = Dataset.from_pandas(test_df[[schema.text_col]])
+    ds_te = ds_te.map(encode_test, batched=True, remove_columns=ds_te.column_names)
+
     n_train = len(train_df)
     n_test = len(test_df)
     n_classes = config.NUM_CLASSES
@@ -188,31 +213,8 @@ def run_transformer_cv(
                 id2label={i - 1: str(i) for i in config.LABELS},
             )
 
-            def encode(batch):
-                tok = tokenizer(
-                    batch[schema.text_col],
-                    truncation=True,
-                    max_length=max_len,
-                    padding=False,
-                )
-                tok["labels"] = (np.asarray(batch[schema.label_col], dtype=int) - 1).tolist()
-                return tok
-
-            ds_tr = Dataset.from_pandas(tr_df[[schema.text_col, schema.label_col]])
-            ds_va = Dataset.from_pandas(va_df[[schema.text_col, schema.label_col]])
-            ds_tr = ds_tr.map(encode, batched=True, remove_columns=ds_tr.column_names)
-            ds_va = ds_va.map(encode, batched=True, remove_columns=ds_va.column_names)
-
-            def encode_test(batch):
-                return tokenizer(
-                    batch[schema.text_col],
-                    truncation=True,
-                    max_length=max_len,
-                    padding=False,
-                )
-
-            ds_te = Dataset.from_pandas(test_df[[schema.text_col]])
-            ds_te = ds_te.map(encode_test, batched=True, remove_columns=ds_te.column_names)
+            ds_tr = ds_full.select(tr_idx.tolist())
+            ds_va = ds_full.select(va_idx.tolist())
 
             use_fp16 = torch.cuda.is_available()
 
