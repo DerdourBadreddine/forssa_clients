@@ -61,16 +61,16 @@ class TransformerConfig:
     max_length: int = 256
     train_batch_size: int = 8
     eval_batch_size: int = 16
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.05
-    num_train_epochs: int = 4
-    warmup_ratio: float = 0.1
+    learning_rate: float = 1e-5
+    weight_decay: float = 0.01
+    num_train_epochs: int = 5
+    warmup_ratio: float = 0.06
     logging_steps: int = 50
     eval_steps: int = 100
     save_total_limit: int = 1
     gradient_accumulation_steps: int = 2
     early_stopping_patience: int = 2
-    label_smoothing: float = 0.05
+    label_smoothing: float = 0.0
     fp16: bool = True  # will be auto-disabled if CUDA is unavailable
 
 

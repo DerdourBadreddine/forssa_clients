@@ -97,6 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fine-tune XLM-R on customer comments")
     parser.add_argument("--data-dir", type=Path, default=config.DATA_DIR)
     parser.add_argument("--output-dir", type=Path, default=config.TRANSFORMER_DIR)
+    parser.add_argument("--report_to", type=str, default="none", help="Logging target: none, wandb, tensorboard")
     args = parser.parse_args()
 
     set_seed(config.SEED)
@@ -136,6 +137,8 @@ def main():
         warmup_ratio=config.transformer_config.warmup_ratio,
         fp16=use_fp16,
         dataloader_num_workers=2,
+        lr_scheduler_type="cosine",
+        report_to=None if args.report_to == "none" else args.report_to,
     )
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
