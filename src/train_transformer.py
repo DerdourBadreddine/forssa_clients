@@ -111,6 +111,7 @@ def main():
         output_dir=args.output_dir / "checkpoints",
         evaluation_strategy="steps",
         save_strategy="steps",
+        save_steps=config.transformer_config.eval_steps,
         learning_rate=config.transformer_config.learning_rate,
         per_device_train_batch_size=config.transformer_config.train_batch_size,
         per_device_eval_batch_size=config.transformer_config.eval_batch_size,
