@@ -242,15 +242,36 @@ def train_oof_tfidf(
         "nbsvm": oof_nbsvm,
     }
     ranked = sorted(oof_scores.items(), key=lambda x: x[1], reverse=True)
-    a, b = ranked[0][0], ranked[1][0]
 
-    best_blend = {"models": [a, b], "w": 0.5, opt_metric: -1.0}
+    # 2-model blend search (coarse grid)
+    a, b = ranked[0][0], ranked[1][0]
+    best_blend_2 = {"models": [a, b], "w": 0.5, opt_metric: -1.0}
     for w in np.linspace(0.0, 1.0, 21):
         blend = w * probs[a] + (1 - w) * probs[b]
         y_pred = np.array(config.LABELS)[np.argmax(blend, axis=1)]
         sc = metric_fn(y, y_pred)
-        if sc > best_blend[opt_metric]:
-            best_blend = {"models": [a, b], "w": float(w), opt_metric: float(sc)}
+        if sc > best_blend_2[opt_metric]:
+            best_blend_2 = {"models": [a, b], "w": float(w), opt_metric: float(sc)}
+
+    # 3-model blend search over simplex (coarse grid)
+    m1, m2, m3 = ranked[0][0], ranked[1][0], ranked[2][0]
+    best_blend_3 = {"models": [m1, m2, m3], "weights": [1 / 3, 1 / 3, 1 / 3], opt_metric: -1.0}
+    grid = np.linspace(0.0, 1.0, 21)
+    for w1 in grid:
+        for w2 in grid:
+            w3 = 1.0 - w1 - w2
+            if w3 < 0.0 or w3 > 1.0:
+                continue
+            blend = w1 * probs[m1] + w2 * probs[m2] + w3 * probs[m3]
+            y_pred = np.array(config.LABELS)[np.argmax(blend, axis=1)]
+            sc = metric_fn(y, y_pred)
+            if sc > best_blend_3[opt_metric]:
+                best_blend_3 = {"models": [m1, m2, m3], "weights": [float(w1), float(w2), float(w3)], opt_metric: float(sc)}
+
+    # Choose best blend among 2- and 3-model blends
+    best_blend = best_blend_2
+    if best_blend_3[opt_metric] > best_blend_2[opt_metric]:
+        best_blend = best_blend_3
 
     # Save OOF arrays
     ensure_dir(out_dir)
@@ -446,6 +467,7 @@ def main():
 
     print("Experiment:", exp)
     print("Optimized metric:", args.opt_metric)
+    print("Using social feature:", use_social, "(col=", schema.social_col, ")")
     print("OOF scores (optimized):", results["oof_scores"])
     if results.get("oof_scores_diag"):
         print("OOF scores (diagnostic):", results["oof_scores_diag"])

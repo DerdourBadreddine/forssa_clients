@@ -104,11 +104,22 @@ def main():
         probs = _predict_tfidf_payload(payload, test_df)
     else:
         blend = best["best_blend"]
-        a, b = blend["models"]
-        w = float(blend["w"])
-        pa = _predict_tfidf_payload(joblib.load(models[a]), test_df)
-        pb = _predict_tfidf_payload(joblib.load(models[b]), test_df)
-        probs = w * pa + (1 - w) * pb
+        blend_models = blend["models"]
+        # Backward compatible: either {models:[a,b], w:0.6} or {models:[a,b,c], weights:[...]} 
+        if "weights" in blend:
+            weights = [float(x) for x in blend["weights"]]
+            if len(weights) != len(blend_models):
+                raise RuntimeError(f"Blend weights length {len(weights)} != models length {len(blend_models)}")
+            probs = None
+            for m, w in zip(blend_models, weights):
+                pm = _predict_tfidf_payload(joblib.load(models[m]), test_df)
+                probs = pm * w if probs is None else (probs + pm * w)
+        else:
+            a, b = blend_models
+            w = float(blend["w"])
+            pa = _predict_tfidf_payload(joblib.load(models[a]), test_df)
+            pb = _predict_tfidf_payload(joblib.load(models[b]), test_df)
+            probs = w * pa + (1 - w) * pb
 
     labels = np.array(config.LABELS)
     preds = labels[np.argmax(probs, axis=1)]
