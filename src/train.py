@@ -21,6 +21,7 @@ from sklearn.linear_model import SGDClassifier
 from . import config
 from .data_io import add_normalized_hash, compute_class_weights, load_datasets
 from .exp_utils import ensure_dir, run_id, set_global_seed, write_json, append_jsonl
+from .proba_utils import assert_proba_is_canonical, predict_proba_canonical
 
 
 @dataclass
@@ -113,6 +114,9 @@ def _predict_proba_from_sgd(clf: SGDClassifier, X: csr_matrix) -> np.ndarray:
     return exp / exp.sum(axis=1, keepdims=True)
 
 
+CANONICAL = config.LABELS
+
+
 def train_oof_tfidf(
     train_text: List[str],
     train_social: List[str] | None,
@@ -170,7 +174,8 @@ def train_oof_tfidf(
                 class_weight=class_weight,
             )
             logreg.fit(X_tr, y_tr)
-            p = logreg.predict_proba(X_va)
+            p = predict_proba_canonical(logreg, X_va, CANONICAL)
+            assert_proba_is_canonical(p, CANONICAL)
             oof_logreg[va_idx] += p / len(seeds)
             fold_scores["logreg"].append(metric_fn(y_va, logreg.predict(X_va)))
 
@@ -185,7 +190,13 @@ def train_oof_tfidf(
                 random_state=seed,
             )
             sgd.fit(X_tr, y_tr)
-            p2 = _predict_proba_from_sgd(sgd, X_va)
+            # Use canonical reordering (never assume column order)
+            p2_raw = _predict_proba_from_sgd(sgd, X_va)
+            # _predict_proba_from_sgd returns columns in sgd.classes_ order
+            from .proba_utils import reorder_proba_to_canonical
+
+            p2 = reorder_proba_to_canonical(p2_raw, sgd.classes_, CANONICAL)
+            assert_proba_is_canonical(p2, CANONICAL)
             oof_sgd[va_idx] += p2 / len(seeds)
             fold_scores["sgd"].append(metric_fn(y_va, sgd.predict(X_va)))
 
@@ -206,7 +217,8 @@ def train_oof_tfidf(
                 class_weight=class_weight,
             )
             nbsvm.fit(X_tr_nb, y_tr)
-            p3 = nbsvm.predict_proba(X_va_nb)
+            p3 = predict_proba_canonical(nbsvm, X_va_nb, CANONICAL)
+            assert_proba_is_canonical(p3, CANONICAL)
             oof_nbsvm[va_idx] += p3 / len(seeds)
             fold_scores["nbsvm"].append(metric_fn(y_va, nbsvm.predict(X_va_nb)))
 
