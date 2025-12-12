@@ -127,6 +127,7 @@ def train_oof_tfidf(
     n_splits: int,
     out_dir: Path,
     opt_metric: str,
+    blend_trials: int,
 ) -> Dict[str, Any]:
     n = len(y)
     n_classes = len(config.LABELS)
@@ -255,30 +256,46 @@ def train_oof_tfidf(
     }
     ranked = sorted(oof_scores.items(), key=lambda x: x[1], reverse=True)
 
-    # 2-model blend search (coarse grid)
+    # 2-model blend search (fine grid)
     a, b = ranked[0][0], ranked[1][0]
     best_blend_2 = {"models": [a, b], "w": 0.5, opt_metric: -1.0}
-    for w in np.linspace(0.0, 1.0, 21):
+    for w in np.linspace(0.0, 1.0, 101):
         blend = w * probs[a] + (1 - w) * probs[b]
         y_pred = np.array(config.LABELS)[np.argmax(blend, axis=1)]
         sc = metric_fn(y, y_pred)
         if sc > best_blend_2[opt_metric]:
             best_blend_2 = {"models": [a, b], "w": float(w), opt_metric: float(sc)}
 
-    # 3-model blend search over simplex (coarse grid)
+    # 3-model blend search over simplex (deterministic random search)
     m1, m2, m3 = ranked[0][0], ranked[1][0], ranked[2][0]
     best_blend_3 = {"models": [m1, m2, m3], "weights": [1 / 3, 1 / 3, 1 / 3], opt_metric: -1.0}
-    grid = np.linspace(0.0, 1.0, 21)
-    for w1 in grid:
-        for w2 in grid:
-            w3 = 1.0 - w1 - w2
-            if w3 < 0.0 or w3 > 1.0:
-                continue
-            blend = w1 * probs[m1] + w2 * probs[m2] + w3 * probs[m3]
-            y_pred = np.array(config.LABELS)[np.argmax(blend, axis=1)]
-            sc = metric_fn(y, y_pred)
-            if sc > best_blend_3[opt_metric]:
-                best_blend_3 = {"models": [m1, m2, m3], "weights": [float(w1), float(w2), float(w3)], opt_metric: float(sc)}
+    rng = np.random.RandomState(config.SEED)
+    # Also evaluate a few hand-picked candidates
+    candidates = [
+        (1 / 3, 1 / 3, 1 / 3),
+        (0.5, 0.25, 0.25),
+        (0.25, 0.5, 0.25),
+        (0.25, 0.25, 0.5),
+        (0.7, 0.2, 0.1),
+        (0.8, 0.1, 0.1),
+    ]
+
+    def _eval_weights(w1: float, w2: float, w3: float) -> float:
+        blend = w1 * probs[m1] + w2 * probs[m2] + w3 * probs[m3]
+        y_pred = np.array(config.LABELS)[np.argmax(blend, axis=1)]
+        return metric_fn(y, y_pred)
+
+    for w1, w2, w3 in candidates:
+        sc = _eval_weights(w1, w2, w3)
+        if sc > best_blend_3[opt_metric]:
+            best_blend_3 = {"models": [m1, m2, m3], "weights": [float(w1), float(w2), float(w3)], opt_metric: float(sc)}
+
+    for _ in range(int(blend_trials)):
+        # Dirichlet samples valid simplex weights
+        w = rng.dirichlet(alpha=[1.0, 1.0, 1.0])
+        sc = _eval_weights(float(w[0]), float(w[1]), float(w[2]))
+        if sc > best_blend_3[opt_metric]:
+            best_blend_3 = {"models": [m1, m2, m3], "weights": [float(w[0]), float(w[1]), float(w[2])], opt_metric: float(sc)}
 
     # Choose best blend among 2- and 3-model blends
     best_blend = best_blend_2
@@ -300,6 +317,7 @@ def train_oof_tfidf(
         "oof_scores_diag": oof_scores_diag,
         "best_blend": best_blend,
         "opt_metric": opt_metric,
+        "blend_trials": int(blend_trials),
     }
 
 
@@ -399,6 +417,7 @@ def main():
     parser.add_argument("--char-ngram", type=str, default="3,7")
     parser.add_argument("--opt-metric", choices=["macro_f1", "accuracy"], default="macro_f1")
     parser.add_argument("--use-social", choices=["auto", "on", "off"], default="auto")
+    parser.add_argument("--blend-trials", type=int, default=15000, help="Random blend trials for 3-model simplex search")
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -438,7 +457,7 @@ def main():
         max_features_char=args.max_char,
     )
 
-    results = train_oof_tfidf(texts, social_values, y, groups, spec, seeds, args.folds, out_dir, args.opt_metric)
+    results = train_oof_tfidf(texts, social_values, y, groups, spec, seeds, args.folds, out_dir, args.opt_metric, args.blend_trials)
 
     # Persist experiment log
     summary = {
