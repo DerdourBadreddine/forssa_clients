@@ -29,15 +29,32 @@ def _quick_probe_val_strategy(
     seed: int,
 ) -> dict:
     """Fast TF-IDF(LR) probe to compare validation strategies."""
-    splits, _, stats = build_cv_splits_v2(
-        train_df,
-        schema,
-        n_splits=folds,
-        seed=seed,
-        split_strategy=split_strategy,
-        group_mode=group_mode,
-        return_stats=True,
-    )
+    used_group_mode = group_mode
+    try:
+        splits, _, stats = build_cv_splits_v2(
+            train_df,
+            schema,
+            n_splits=folds,
+            seed=seed,
+            split_strategy=split_strategy,
+            group_mode=group_mode,
+            return_stats=True,
+        )
+    except RuntimeError as e:
+        # If strong leakage is detected under exact grouping, escalate to strong grouping for the probe.
+        if group_mode == "exact" and "Leakage detected" in str(e):
+            used_group_mode = "strong"
+            splits, _, stats = build_cv_splits_v2(
+                train_df,
+                schema,
+                n_splits=folds,
+                seed=seed,
+                split_strategy=split_strategy,
+                group_mode="strong",
+                return_stats=True,
+            )
+        else:
+            raise
 
     y = train_df[schema.label_col].astype(int).to_numpy()
     text = train_df[schema.text_col].astype(str).to_numpy()
@@ -97,7 +114,8 @@ def _quick_probe_val_strategy(
 
     return {
         "split_strategy": split_strategy,
-        "group_mode": group_mode,
+        "group_mode": used_group_mode,
+        "auto_escalated_group_mode": bool(used_group_mode != group_mode),
         "fold_macro_f1": fold_f1,
         "mean_macro_f1": mean,
         "std_macro_f1": std,

@@ -259,19 +259,70 @@ def build_cv_splits_v2(
                 }
             )
     else:
-        # V2: production-like. First, try to split by a platform/channel column.
+        # V2: production-like.
+        # We MUST still enforce strong near-duplicate isolation.
+        # To avoid leakage, we split at the strong-group level and then expand to rows.
         group_col = _detect_column(df, PRODUCTION_GROUP_CANDIDATES)
-        if group_col is not None:
-            g = df[group_col].fillna("").astype(str).str.strip().to_numpy()
-            unique = len(set(g))
-            if unique >= n_splits:
-                splitter = GroupKFold(n_splits=n_splits)
-                iterator = splitter.split(df, y, groups=g)
-            else:
-                splitter = GroupShuffleSplit(n_splits=n_splits, test_size=min(0.2, 1.0 / max(n_splits, 2)), random_state=seed)
-                iterator = splitter.split(df, y, groups=g)
 
-            for fold, (tr_idx, va_idx) in enumerate(iterator):
+        # Build mapping: strong_group -> list[row_idx]
+        group_to_rows: dict[str, list[int]] = {}
+        for idx, g in enumerate(strong_groups.tolist()):
+            group_to_rows.setdefault(g, []).append(int(idx))
+
+        unique_groups = np.asarray(list(group_to_rows.keys()), dtype=object)
+
+        def expand(group_idx: np.ndarray) -> np.ndarray:
+            rows: list[int] = []
+            for gi in group_idx.tolist():
+                rows.extend(group_to_rows[str(unique_groups[int(gi)])])
+            return np.asarray(rows, dtype=int)
+
+        # Derive per-group metadata / strat keys
+        group_label = np.zeros(len(unique_groups), dtype=int)
+        group_meta = None
+        meta_conflicts = 0
+        if group_col is not None:
+            meta_vals = df[group_col].fillna("").astype(str).str.strip().to_numpy()
+            group_meta = np.empty(len(unique_groups), dtype=object)
+            for i, g in enumerate(unique_groups.tolist()):
+                rows = group_to_rows[str(g)]
+                y_rows = y[np.asarray(rows, dtype=int)]
+                # Representative label: majority within group (usually 1)
+                vals, cnts = np.unique(y_rows, return_counts=True)
+                group_label[i] = int(vals[int(np.argmax(cnts))])
+
+                m = meta_vals[np.asarray(rows, dtype=int)]
+                uniq = set(m.tolist())
+                if len(uniq) > 1:
+                    meta_conflicts += 1
+                # Representative meta: most common
+                mv, mc = np.unique(m, return_counts=True)
+                group_meta[i] = mv[int(np.argmax(mc))]
+        else:
+            for i, g in enumerate(unique_groups.tolist()):
+                rows = group_to_rows[str(g)]
+                y_rows = y[np.asarray(rows, dtype=int)]
+                vals, cnts = np.unique(y_rows, return_counts=True)
+                group_label[i] = int(vals[int(np.argmax(cnts))])
+
+        if group_col is not None and meta_conflicts == 0:
+            # Split by metadata group at strong-group granularity
+            gmeta = np.asarray(group_meta, dtype=object)
+            unique_meta = len(set(gmeta.tolist()))
+            if unique_meta >= n_splits:
+                splitter = GroupKFold(n_splits=n_splits)
+                iterator = splitter.split(np.zeros(len(unique_groups)), group_label, groups=gmeta)
+            else:
+                splitter = GroupShuffleSplit(
+                    n_splits=n_splits,
+                    test_size=min(0.2, 1.0 / max(n_splits, 2)),
+                    random_state=seed,
+                )
+                iterator = splitter.split(np.zeros(len(unique_groups)), group_label, groups=gmeta)
+
+            for fold, (tr_gi, va_gi) in enumerate(iterator):
+                tr_idx = expand(tr_gi)
+                va_idx = expand(va_gi)
                 _enforce_strong_leakage_check(strong_groups, tr_idx, va_idx)
                 splits.append((tr_idx, va_idx))
                 tr_strong = set(strong_groups[tr_idx])
@@ -282,8 +333,8 @@ def build_cv_splits_v2(
                         "n_train": int(len(tr_idx)),
                         "n_valid": int(len(va_idx)),
                         "group_col": group_col,
-                        "n_groups_train": int(len(set(g[tr_idx]))),
-                        "n_groups_valid": int(len(set(g[va_idx]))),
+                        "meta_conflict_groups": int(meta_conflicts),
+                        "n_meta_groups": int(unique_meta),
                         "n_strong_groups_train": int(len(tr_strong)),
                         "n_strong_groups_valid": int(len(va_strong)),
                         "strong_duplicate_count_train": int(len(tr_idx) - len(tr_strong)),
@@ -291,18 +342,33 @@ def build_cv_splits_v2(
                     }
                 )
         else:
-            # Pseudo-production: stratify by (label + length bucket + script bucket)
+            # Pseudo-production stratification (label + length bucket + script bucket) at strong-group level.
             text = df[schema.text_col].astype(str).to_numpy()
             lengths = np.asarray([len(t) for t in text], dtype=float)
             len_b = _length_bucket(lengths)
             scr_b = np.asarray([_script_bucket(t) for t in text], dtype=object)
             scr_map = {"arabic": 0, "latin": 1, "mixed": 2}
             scr_i = np.asarray([scr_map.get(s, 2) for s in scr_b], dtype=int)
-            # Composite stratification key
-            strat_key = np.asarray([f"{int(lbl)}_{int(lb)}_{int(sb)}" for lbl, lb, sb in zip(y, len_b, scr_i)], dtype=object)
+
+            group_len = np.zeros(len(unique_groups), dtype=int)
+            group_scr = np.zeros(len(unique_groups), dtype=int)
+            for i, g in enumerate(unique_groups.tolist()):
+                rows = np.asarray(group_to_rows[str(g)], dtype=int)
+                # Representative buckets: majority within group
+                lv, lc = np.unique(len_b[rows], return_counts=True)
+                sv, sc = np.unique(scr_i[rows], return_counts=True)
+                group_len[i] = int(lv[int(np.argmax(lc))])
+                group_scr[i] = int(sv[int(np.argmax(sc))])
+
+            strat_key = np.asarray(
+                [f"{int(lbl)}_{int(lb)}_{int(sb)}" for lbl, lb, sb in zip(group_label, group_len, group_scr)],
+                dtype=object,
+            )
 
             skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-            for fold, (tr_idx, va_idx) in enumerate(skf.split(df, strat_key)):
+            for fold, (tr_gi, va_gi) in enumerate(skf.split(np.zeros(len(unique_groups)), strat_key)):
+                tr_idx = expand(tr_gi)
+                va_idx = expand(va_gi)
                 _enforce_strong_leakage_check(strong_groups, tr_idx, va_idx)
                 splits.append((tr_idx, va_idx))
                 tr_strong = set(strong_groups[tr_idx])
@@ -313,8 +379,9 @@ def build_cv_splits_v2(
                         "n_train": int(len(tr_idx)),
                         "n_valid": int(len(va_idx)),
                         "pseudo_production": True,
-                        "n_strat_keys_train": int(len(set(strat_key[tr_idx]))),
-                        "n_strat_keys_valid": int(len(set(strat_key[va_idx]))),
+                        "group_col": group_col,
+                        "meta_conflict_groups": int(meta_conflicts),
+                        "n_strat_keys": int(len(set(strat_key.tolist()))),
                         "n_strong_groups_train": int(len(tr_strong)),
                         "n_strong_groups_valid": int(len(va_strong)),
                         "strong_duplicate_count_train": int(len(tr_idx) - len(tr_strong)),
